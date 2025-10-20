@@ -72,11 +72,12 @@ def wa_link(number: str, message: str) -> str:
     return f"https://wa.me/{num}?text={urllib.parse.quote(message)}" if num else ""
 
 def norm_phone(s: str) -> str:
-    d = "".join(ch for ch in str(s).isdigit() and s or "" if False else [c for c in str(s) if c.isdigit()])
-    # (الحيلة أعلاه علشان نحافظ على التوافق) — نكتبها صريحة:
+    """حوّل الهاتف إلى 216XXXXXXXX إن كان 8 أرقام محلية، وخلّي أي رقم ثاني كما هو بعد تنظيفه من غير الأرقام."""
     d = "".join(c for c in str(s) if c.isdigit())
-    if d.startswith("216"): return d
-    if len(d)==8: return "216"+d
+    if d.startswith("216"):
+        return d
+    if len(d) == 8:
+        return "216" + d
     return d
 
 # ---------------- اختيار الفرع + قفل الموظفين ----------------
@@ -375,7 +376,7 @@ with tab_rep:
     for p in plans:
         tid = p["trainee_id"]; sid = p["subject_id"]
         trainee = tr_by_id.get(tid); subj = sub_by_id.get(sid)
-        if not trainee or not subj:  # سلامة
+        if not trainee or not subj:
             continue
 
         total_hours  = float(p.get("total_hours", 0.0))
