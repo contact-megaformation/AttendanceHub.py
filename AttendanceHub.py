@@ -1,6 +1,8 @@
-# AttendanceHub.py
-# إدارة غيابات المتكونين — بدون Google Sheets
-# حفظ محلّي في مجلّد att_data/ + توليد رسائل واتساب آليًا
+# AbsencesHub.py
+# إدارة غيابات المتكوّنين (محليًا بدون Google Sheets)
+# يحفظ البيانات في attn/index.json
+# حساب الغياب = 10% من إجمالي ساعات البرنامج
+# "الغياب بشهادة طبية" لا يحتسب ضمن ساعات الغياب
 
 import os, json, uuid, urllib.parse
 from datetime import datetime, date
@@ -9,413 +11,267 @@ from typing import Dict, Any, List
 import streamlit as st
 import pandas as pd
 
-# ================= إعداد الصفحة =================
-st.set_page_config(page_title="Attendance Hub", layout="wide")
+# ---------- إعداد عام ----------
+st.set_page_config(page_title="منظومة الغيابات", layout="wide")
 st.markdown("""
 <div style='text-align:center'>
-  <h1>🗂️ إدارة غيابات المتكوّنين</h1>
-  <p>إضافة متكوّنين ومواد | تعليم الغيابات حسب الحصص | حساب تلقائي | رسالة واتساب</p>
+  <h1>🕒 منظومة الغيابات للمتكوّنين</h1>
+  <p>تسجيل الحصص والغيابات | حساب 10% | رسالة واتساب</p>
 </div>
 <hr/>
 """, unsafe_allow_html=True)
 
-# ================= التخزين المحلي =================
+# ---------- تخزين محلّي ----------
 ROOT = os.getcwd()
-DATA_DIR = os.path.join(ROOT, "att_data")
+DATA_DIR = os.path.join(ROOT, "attn")
 IDX_PATH = os.path.join(DATA_DIR, "index.json")
 
 def ensure_store():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(IDX_PATH):
         with open(IDX_PATH, "w", encoding="utf-8") as f:
-            json.dump({
-                "trainees": [],   # [{id,name,phone}]
-                "subjects": [],   # [{id,name,total_sessions}]
-                "sessions": [],   # [{id,dt,subject_id,note}]
-                "absences": [],   # [{session_id, trainee_id}]
-                "settings": {     # صيغة الحساب
-                    "formula_mode": "percentage",  # "percentage" أو "fixed"
-                    "percentage_allowed": 20,      # % من إجمالي حصص المادة
-                    "fixed_allowed": 3,            # حد أقصى ثابت
-                    "wa_number_MB": "",            # رقم واتساب فرع منزل بورقيبة (اختياري)
-                    "wa_number_BZ": "",            # رقم واتساب فرع بنزرت (اختياري)
-                    "wa_branch_default": "Menzel Bourguiba"
-                }
-            }, f, ensure_ascii=False, indent=2)
+            json.dump({"trainees": [], "subjects": [], "sessions": []}, f, ensure_ascii=False, indent=2)
 
-def load_data() -> Dict[str, Any]:
+def load_db() -> Dict[str, Any]:
     ensure_store()
-    with open(IDX_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(IDX_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"trainees": [], "subjects": [], "sessions": []}
 
-def save_data(data: Dict[str, Any]):
+def save_db(db: Dict[str, Any]):
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp = IDX_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(db, f, ensure_ascii=False, indent=2)
     os.replace(tmp, IDX_PATH)
 
-def human_dt(ts: str|date) -> str:
-    if isinstance(ts, date):
-        return ts.strftime("%Y-%m-%d")
-    try:
-        return datetime.fromisoformat(str(ts)).strftime("%Y-%m-%d")
-    except Exception:
-        return str(ts)
+def normalize_tn_phone(s: str) -> str:
+    digits = "".join(ch for ch in str(s) if ch.isdigit())
+    if digits.startswith("216"): return digits
+    if len(digits) == 8: return "216" + digits
+    return digits
 
 def wa_link(number: str, message: str) -> str:
     num = "".join(c for c in str(number) if c.isdigit())
     return f"https://wa.me/{num}?text={urllib.parse.quote(message)}" if num else ""
 
-# ================= تبويبات الواجهة =================
-tab_cfg, tab_lists, tab_mark, tab_dash, tab_wa = st.tabs([
-    "⚙️ الإعدادات", "👥 القوائم", "📝 تعليم الغيابات", "📊 لوحة الإحصائيات", "💬 رسائل واتساب"
-])
+# ---------- ثوابت ----------
+ABS_LIMIT_PCT = 10.0  # % الحد الأقصى للغياب
 
-data = load_data()
+# ---------- Tabs ----------
+tab_mng, tab_sess, tab_dash = st.tabs(["👥 المتكوّنون والمواد", "🗓️ تسجيل الحصص/الغياب", "📊 ملخّص وحسابات"])
 
-# ---------------------------------------------------
-# ⚙️ الإعدادات
-# ---------------------------------------------------
-with tab_cfg:
-    st.subheader("صيغة حساب المسموح من الغيابات")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        formula_mode = st.selectbox(
-            "طريقة الحساب", ["percentage", "fixed"],
-            index=0 if data["settings"].get("formula_mode","percentage")=="percentage" else 1
-        )
-    with c2:
-        perc = st.number_input(
-            "النسبة المسموح بها (%)",
-            min_value=0, max_value=100, step=1,
-            value=int(data["settings"].get("percentage_allowed", 20))
-        )
-    with c3:
-        fixed = st.number_input(
-            "حد ثابت للغيابات المسموح بها",
-            min_value=0, max_value=100, step=1,
-            value=int(data["settings"].get("fixed_allowed", 3))
-        )
+db = load_db()
 
-    st.markdown("---")
-    st.subheader("أرقام واتساب للجهات (اختياري)")
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        wa_MB = st.text_input("رقم واتساب — منزل بورقيبة (مثال: 2169XXXXXXXX)",
-                              value=data["settings"].get("wa_number_MB",""))
-    with b2:
-        wa_BZ = st.text_input("رقم واتساب — بنزرت (مثال: 2169XXXXXXXX)",
-                              value=data["settings"].get("wa_number_BZ",""))
-    with b3:
-        default_branch = st.selectbox("الفرع الافتراضي للإرسال", ["Menzel Bourguiba","Bizerte"],
-                                      index=(0 if data["settings"].get("wa_branch_default","Menzel Bourguiba")=="Menzel Bourguiba" else 1))
+# ========== تبويب إدارة المتكوّنين والمواد ==========
+with tab_mng:
+    colA, colB = st.columns(2)
 
-    if st.button("💾 حفظ الإعدادات"):
-        data["settings"]["formula_mode"] = formula_mode
-        data["settings"]["percentage_allowed"] = int(perc)
-        data["settings"]["fixed_allowed"] = int(fixed)
-        data["settings"]["wa_number_MB"] = wa_MB.strip()
-        data["settings"]["wa_number_BZ"] = wa_BZ.strip()
-        data["settings"]["wa_branch_default"] = default_branch
-        save_data(data)
-        st.success("تمّ الحفظ ✅")
-
-# ---------------------------------------------------
-# 👥 القوائم (متكوّنين + مواد + حصص)
-# ---------------------------------------------------
-with tab_lists:
-    st.subheader("المتكوّنون (تُضاف يدويًا)")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        tr_name = st.text_input("اسم المتكوّن")
-    with c2:
-        tr_phone = st.text_input("هاتف المتكوّن (واتساب)")
-    with c3:
-        if st.button("➕ إضافة متكوّن"):
-            if tr_name.strip():
-                data = load_data()
-                data["trainees"].append({
+    with colA:
+        st.subheader("➕ إضافة متكوّن")
+        with st.form("add_trainee"):
+            tr_name = st.text_input("الاسم الكامل")
+            tr_phone = st.text_input("الهاتف")
+            total_hours = st.number_input("إجمالي ساعات البرنامج", min_value=0.0, step=1.0, help="يُستعمل لاحتساب 10%")
+            weekly_hours = st.number_input("ساعات الأسبوع (اختياري)", min_value=0.0, step=1.0, help="لتسهيل إدخال ساعات الحصّة default")
+            submitted = st.form_submit_button("حفظ المتكوّن")
+        if submitted:
+            if not tr_name.strip() or not tr_phone.strip() or total_hours <= 0:
+                st.error("❌ الاسم/الهاتف مطلوبان، وإجمالي الساعات يجب أن يكون أكبر من 0.")
+            else:
+                new_rec = {
                     "id": uuid.uuid4().hex[:10],
                     "name": tr_name.strip(),
-                    "phone": "".join(ch for ch in tr_phone if ch.isdigit())
-                })
-                save_data(data)
-                st.success("تمت الإضافة ✅")
+                    "phone": normalize_tn_phone(tr_phone),
+                    "total_hours": float(total_hours),
+                    "weekly_hours": float(weekly_hours),
+                    "created_at": datetime.now().isoformat(timespec="seconds")
+                }
+                db["trainees"].append(new_rec)
+                save_db(db)
+                st.success("✅ تمّت إضافة المتكوّن.")
+
+        if db["trainees"]:
+            st.markdown("#### قائمة المتكوّنين")
+            tdf = pd.DataFrame(db["trainees"])
+            tdf["الهاتف"] = tdf["phone"]
+            tdf["الاسم"] = tdf["name"]
+            tdf["إجمالي الساعات"] = tdf["total_hours"]
+            tdf["ساعات الأسبوع"] = tdf["weekly_hours"]
+            tdf["أضيف في"] = pd.to_datetime(tdf["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
+            st.dataframe(tdf[["الاسم","الهاتف","إجمالي الساعات","ساعات الأسبوع","أضيف في"]], use_container_width=True)
+
+    with colB:
+        st.subheader("📚 المواد")
+        with st.form("add_subject"):
+            subj_name = st.text_input("اسم المادة")
+            ok_s = st.form_submit_button("إضافة مادة")
+        if ok_s:
+            if not subj_name.strip():
+                st.error("❌ اسم المادة مطلوب.")
             else:
-                st.error("يرجى إدخال الاسم.")
+                if subj_name.strip().lower() in [s["name"].lower() for s in db["subjects"]]:
+                    st.warning("⚠️ المادة موجودة من قبل.")
+                else:
+                    db["subjects"].append({"id": uuid.uuid4().hex[:10], "name": subj_name.strip()})
+                    save_db(db)
+                    st.success("✅ تمّت إضافة المادة.")
 
-    if data["trainees"]:
-        df_t = pd.DataFrame(data["trainees"])
-        df_t_display = df_t.rename(columns={"name":"الاسم","phone":"الهاتف","id":"الكود"})
-        st.dataframe(df_t_display[["الاسم","الهاتف","الكود"]], use_container_width=True, height=260)
+        if db["subjects"]:
+            sdf = pd.DataFrame(db["subjects"])
+            sdf["المادة"] = sdf["name"]
+            st.dataframe(sdf[["المادة"]], use_container_width=True)
+
+# ========== تبويب تسجيل الحصص/الغياب ==========
+with tab_sess:
+    st.subheader("تسجيل حصة (حاضر/غائب)")
+
+    if not db["trainees"] or not db["subjects"]:
+        st.info("أضِف على الأقل متكوّنًا ومادة واحدة أولاً.")
     else:
-        st.info("لا يوجد متكوّنون بعد.")
+        # اختيار متكوّن
+        tr_options = {f"{t['name']} — +{t['phone']}": t for t in db["trainees"]}
+        tr_key = st.selectbox("اختر المتكوّن", list(tr_options.keys()))
+        tr = tr_options[tr_key]
 
-    st.markdown("---")
-    st.subheader("المواد (Matières)")
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        subj_name = st.text_input("اسم المادة/الوحدة")
-    with s2:
-        total_sessions = st.number_input("إجمالي الحصص المخطّطة", min_value=1, step=1, value=12)
-    with s3:
-        if st.button("➕ إضافة مادة"):
-            if subj_name.strip():
-                data = load_data()
-                data["subjects"].append({
-                    "id": uuid.uuid4().hex[:10],
-                    "name": subj_name.strip(),
-                    "total_sessions": int(total_sessions)
-                })
-                save_data(data)
-                st.success("تمت الإضافة ✅")
-            else:
-                st.error("يرجى إدخال اسم المادة.")
+        # اختيار مادة
+        sub_options = {s["name"]: s for s in db["subjects"]}
+        sub_key = st.selectbox("اختر المادة", list(sub_options.keys()))
+        subj = sub_options[sub_key]
 
-    if data["subjects"]:
-        df_s = pd.DataFrame(data["subjects"])
-        df_s_display = df_s.rename(columns={"name":"المادة","total_sessions":"إجمالي الحصص","id":"الكود"})
-        st.dataframe(df_s_display[["المادة","إجمالي الحصص","الكود"]], use_container_width=True, height=260)
-    else:
-        st.info("لا توجد مواد بعد.")
+        sess_date = st.date_input("تاريخ الحصة", value=date.today())
+        default_hours = float(tr.get("weekly_hours", 0.0)) if float(tr.get("weekly_hours", 0.0)) > 0 else 2.0
+        sess_hours = st.number_input("ساعات الحصة", min_value=0.5, step=0.5, value=default_hours)
+        is_absent = st.checkbox("المتكوّن غائب؟")
+        has_medical = False
+        if is_absent:
+            has_medical = st.checkbox("غياب بشهادة طبية؟ (لا يُحتسب ضمن الغياب)")
 
-    st.markdown("---")
-    st.subheader("إدارة الحصص (Sessions)")
-    if not data["subjects"]:
-        st.warning("أضف مواد أولًا.")
-    else:
-        ss1, ss2, ss3 = st.columns(3)
-        with ss1:
-            sess_date = st.date_input("تاريخ الحصة", value=date.today())
-        with ss2:
-            subj_idx_map = {s["name"]: s["id"] for s in data["subjects"]}
-            subj_pick = st.selectbox("المادة", list(subj_idx_map.keys()))
-        with ss3:
-            sess_note = st.text_input("ملاحظة (اختياري)")
+        note = st.text_area("ملاحظة (اختياري)")
 
-        if st.button("➕ إنشاء حصة"):
-            data = load_data()
-            data["sessions"].append({
+        if st.button("💾 حفظ الحصة"):
+            rec = {
                 "id": uuid.uuid4().hex[:10],
-                "dt": str(sess_date),
-                "subject_id": subj_idx_map[subj_pick],
-                "note": sess_note.strip()
-            })
-            save_data(data)
-            st.success("تم إنشاء الحصة ✅")
+                "trainee_id": tr["id"],
+                "subject_id": subj["id"],
+                "date": sess_date.isoformat(),
+                "hours": float(sess_hours),
+                "is_absent": bool(is_absent),
+                "medical": bool(has_medical),
+                "note": note.strip(),
+                "ts": datetime.now().isoformat(timespec="seconds")
+            }
+            db["sessions"].append(rec)
+            save_db(db)
+            st.success("✅ تمّ الحفظ.")
 
-        if data["sessions"]:
-            # عرض آخر 30 جلسة
-            df_sessions = pd.DataFrame(data["sessions"])
-            # وصل اسم المادة
-            subj_map = {s["id"]: s["name"] for s in data["subjects"]}
-            df_sessions["المادة"] = df_sessions["subject_id"].map(subj_map)
-            df_sessions["التاريخ"] = pd.to_datetime(df_sessions["dt"]).dt.strftime("%Y-%m-%d")
-            df_sessions["الملاحظة"] = df_sessions["note"]
-            df_sessions["الكود"] = df_sessions["id"]
-            st.dataframe(df_sessions[["التاريخ","المادة","الملاحظة","الكود"]].sort_values("التاريخ", ascending=False).head(30),
-                         use_container_width=True, height=300)
-        else:
-            st.info("لا توجد حصص بعد.")
+        # عرض حصص المتكوّن
+        sess = [s for s in db["sessions"] if s["trainee_id"] == tr["id"]]
+        if sess:
+            df = pd.DataFrame(sess)
+            # enrich
+            sub_map = {s["id"]: s["name"] for s in db["subjects"]}
+            df["التاريخ"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+            df["المادة"] = df["subject_id"].map(sub_map)
+            df["الساعات"] = df["hours"].astype(float)
+            df["غائب؟"] = df["is_absent"].map({True:"نعم", False:"لا"})
+            df["طبي؟"] = df["medical"].map({True:"نعم", False:"لا"})
+            df = df.sort_values("date")
+            st.markdown("#### حصص المتكوّن")
+            st.dataframe(df[["التاريخ","المادة","الساعات","غائب؟","طبي؟","note"]], use_container_width=True)
 
-# ---------------------------------------------------
-# 📝 تعليم الغيابات
-# ---------------------------------------------------
-with tab_mark:
-    st.subheader("علّم الغيابات على حصة")
-    if not data["sessions"]:
-        st.warning("لا توجد حصص. أنشئ حصة من تبويب القوائم.")
-    elif not data["trainees"]:
-        st.warning("لا يوجد متكوّنون. أضف متكوّنين من تبويب القوائم.")
-    else:
-        # اختيار حصة
-        subj_map = {s["id"]: s["name"] for s in data["subjects"]}
-        # اسم عرضي للجلسة
-        def _label(sess):
-            return f"{human_dt(sess['dt'])} — {subj_map.get(sess['subject_id'],'?')} — [{sess['id']}]"
-
-        sess_options = {_label(s): s["id"] for s in sorted(data["sessions"], key=lambda x: x["dt"], reverse=True)}
-        sess_pick_label = st.selectbox("اختر الحصة", list(sess_options.keys()))
-        sess_id = sess_options[sess_pick_label]
-
-        # المتغيبون
-        tr_map = {t["name"]: t["id"] for t in data["trainees"]}
-        # من غاب مسبقًا؟
-        prev_abs = {a["trainee_id"] for a in data["absences"] if a["session_id"] == sess_id}
-        absent_names_default = [t["name"] for t in data["trainees"] if t["id"] in prev_abs]
-
-        abs_sel = st.multiselect("اختر المتغيبين", list(tr_map.keys()), default=absent_names_default)
-
-        # حفظ
-        if st.button("💾 حفظ الغيابات"):
-            data = load_data()
-            # احذف السجلات القديمة لهذه الحصة
-            data["absences"] = [a for a in data["absences"] if a["session_id"] != sess_id]
-            # أضف الجديدة
-            for n in abs_sel:
-                data["absences"].append({
-                    "session_id": sess_id,
-                    "trainee_id": tr_map[n]
-                })
-            save_data(data)
-            st.success("تمّ الحفظ ✅")
-
-        # عرض سريع: من تغيب؟
-        if prev_abs or abs_sel:
-            cur = set(tr_map[n] for n in abs_sel)
-            df_prev = pd.DataFrame([t for t in data["trainees"] if t["id"] in cur])
-            if not df_prev.empty:
-                st.markdown("#### قائمة المتغيبين المختارة لهذه الحصة")
-                st.dataframe(df_prev.rename(columns={"name":"الاسم","phone":"الهاتف"})[["الاسم","الهاتف"]], use_container_width=True)
-
-# ---------------------------------------------------
-# 📊 لوحة الإحصائيات
-# ---------------------------------------------------
+# ========== تبويب الملخّص والحسابات ==========
 with tab_dash:
-    st.subheader("الإحصائيات حسب المادة والمتكوّن")
-    if not data["subjects"] or not data["trainees"]:
-        st.info("أضف مواد ومتكوّنين أولًا.")
+    st.subheader("حساب الغياب ونسبة 10% + رسالة واتساب")
+
+    if not db["trainees"]:
+        st.info("لا يوجد متكوّنون.")
     else:
-        # اختيار مادة (اختياري)
-        subj_all_map = {s["name"]: s["id"] for s in data["subjects"]}
-        subj_choice = st.selectbox("فلتر حسب المادة (اختياري)", ["— الكل —"] + list(subj_all_map.keys()))
-        subj_filter = None if subj_choice == "— الكل —" else subj_all_map[subj_choice]
+        tr_options = {f"{t['name']} — +{t['phone']}": t for t in db["trainees"]}
+        tr_key = st.selectbox("اختر المتكوّن لحساب الملخّص", list(tr_options.keys()), key="dash_tr")
+        tr = tr_options[tr_key]
 
-        # حساب الغيابات
-        df_abs = pd.DataFrame(data["absences"])
-        df_sessions = pd.DataFrame(data["sessions"])
-        df_tr = pd.DataFrame(data["trainees"])
-        df_subj = pd.DataFrame(data["subjects"])
+        # فلترة حسب مادة (اختياري)
+        sub_filter = st.selectbox("فلترة حسب مادة (اختياري)", ["(الكل)"] + [s["name"] for s in db["subjects"]])
 
-        if df_sessions.empty:
-            st.info("لا توجد حصص بعد.")
+        # سحب كل الحصص
+        sess_all = [s for s in db["sessions"] if s["trainee_id"] == tr["id"]]
+        if sub_filter != "(الكل)":
+            subj_id = next((s["id"] for s in db["subjects"] if s["name"] == sub_filter), None)
+            sess_all = [s for s in sess_all if s["subject_id"] == subj_id]
+
+        total_program_hours = float(tr.get("total_hours", 0.0))
+        if total_program_hours <= 0:
+            st.error("هذا المتكوّن لا يملك إجمالي ساعات برنامج صالح. عدّل بياناته أولاً.")
         else:
-            # ربط الأسماء
-            if not df_abs.empty:
-                df_abs = df_abs.merge(df_sessions[["id","subject_id"]].rename(columns={"id":"session_id"}),
-                                      on="session_id", how="left")
+            # الساعات المجدولة = مجموع ساعات كل الحصص المسجلة (حاضر + غائب)
+            scheduled_hours = float(sum(s["hours"] for s in sess_all))
+            # ساعات الغياب الفعلية = مجموع ساعات الحصص الغائبة بدون شهادة طبية
+            absent_effective = float(sum(s["hours"] for s in sess_all if s["is_absent"] and not s["medical"]))
 
-            rows = []
-            for t in data["trainees"]:
-                for s in data["subjects"]:
-                    if subj_filter and s["id"] != subj_filter:
-                        continue
-                    total_sess = int(s.get("total_sessions", 0))
-                    # عدد الغيابات لهذا المتكوّن في هذه المادة
-                    if df_abs.empty:
-                        abs_count = 0
-                    else:
-                        mask = (df_abs["trainee_id"]==t["id"]) & (df_abs["subject_id"]==s["id"])
-                        abs_count = int(mask.sum())
+            # نسبة الغياب (من البرنامج الكلي) = absent_effective / total_program_hours
+            pct_abs = (absent_effective / total_program_hours * 100.0) if total_program_hours > 0 else 0.0
 
-                    # allowed per settings
-                    mode = data["settings"].get("formula_mode","percentage")
-                    if mode == "percentage":
-                        p = int(data["settings"].get("percentage_allowed", 20))
-                        allowed = int((total_sess * p + 99) // 100)  # ceil( total * p% / 100 )
-                    else:
-                        allowed = int(data["settings"].get("fixed_allowed", 3))
-                    allowed = max(0, allowed)
+            # الباقي قبل بلوغ 10% (بالساعات)
+            max_abs_hours = 0.10 * total_program_hours
+            remain_before_10 = max(0.0, max_abs_hours - absent_effective)
 
-                    remaining = max(allowed - abs_count, 0)
-                    rows.append({
-                        "المتكوّن": t["name"],
-                        "الهاتف": t["phone"],
-                        "المادة": s["name"],
-                        "إجمالي الحصص": total_sess,
-                        "المسموح بالغياب": allowed,
-                        "عدد الغيابات": abs_count,
-                        "المتبقي": remaining,
-                        "حالة": ("⚠️ تجاوز" if abs_count > allowed else ("⏳ اقترب" if abs_count == allowed else "✅ ضمن الحد"))
-                    })
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("📚 إجمالي برنامج", f"{total_program_hours:.1f} س")
+            c2.metric("🗓️ مسجّل لحدّ الآن", f"{scheduled_hours:.1f} س")
+            c3.metric("⛔ غياب فعلي", f"{absent_effective:.1f} س")
+            c4.metric("📊 % الغياب", f"{pct_abs:.2f}%")
+            c5.metric("🟢 الباقي قبل 10%", f"{remain_before_10:.1f} س")
 
-            df_out = pd.DataFrame(rows)
-            if df_out.empty:
-                st.info("لا توجد بيانات لعرضها.")
-            else:
-                # ترتيب
-                df_out = df_out.sort_values(["المادة","المتكوّن"]).reset_index(drop=True)
-                st.dataframe(df_out, use_container_width=True, height=450)
+            st.caption("ملاحظة: الغياب بشهادة طبية لا يُحتسب في ⛔ غياب فعلي.")
 
-                # إجمالي سريع لكل مادة
-                st.markdown("#### ملخّص المادة (عدد الغيابات الإجمالي)")
-                grp = df_out.groupby("المادة", dropna=False)["عدد الغيابات"].sum().reset_index()
-                grp = grp.sort_values("عدد الغيابات", ascending=False)
+            # جدول تفصيلي حسب المادة
+            if sess_all:
+                df = pd.DataFrame(sess_all)
+                sub_map = {s["id"]: s["name"] for s in db["subjects"]}
+                df["المادة"] = df["subject_id"].map(sub_map)
+                df["حصة غياب فعلي"] = df.apply(lambda r: (r["hours"] if (r["is_absent"] and not r["medical"]) else 0.0), axis=1)
+                grp = df.groupby("المادة").agg(
+                    حصص=("id","count"),
+                    ساعات_مجدولة=("hours","sum"),
+                    غياب_فعلي=("حصة غياب فعلي","sum"),
+                ).reset_index()
+                st.markdown("#### تفاصيل حسب المادة")
                 st.dataframe(grp, use_container_width=True)
 
-# ---------------------------------------------------
-# 💬 رسائل واتساب
-# ---------------------------------------------------
-with tab_wa:
-    st.subheader("توليد رسالة واتساب لكل متكوّن")
-    if not data["subjects"] or not data["trainees"]:
-        st.info("أضف مواد ومتكوّنين أولًا.")
-    else:
-        # اختيار الفرع (لتحديد رقم الإرسال إن حبّيت)
-        branch = st.selectbox("اختيار الفرع المرسل", ["Menzel Bourguiba","Bizerte"],
-                              index=(0 if data["settings"].get("wa_branch_default","Menzel Bourguiba")=="Menzel Bourguiba" else 1))
-        wa_num = data["settings"].get("wa_number_MB","") if branch=="Menzel Bourguiba" else data["settings"].get("wa_number_BZ","")
-
-        # اختيار المتكوّن والمادة
-        tr_map_by_name = {t["name"]: t for t in data["trainees"]}
-        tr_pick_name = st.selectbox("اختر المتكوّن", list(tr_map_by_name.keys()))
-        subj_map_name = {s["name"]: s for s in data["subjects"]}
-        subj_pick_name = st.selectbox("اختر المادة", list(subj_map_name.keys()))
-
-        t = tr_map_by_name[tr_pick_name]
-        s = subj_map_name[subj_pick_name]
-
-        # احسب بياناته لهذه المادة
-        df_abs = pd.DataFrame(data["absences"])
-        df_sess = pd.DataFrame(data["sessions"])
-        if df_abs.empty or df_sess.empty:
-            abs_count = 0
-        else:
-            df_abs = df_abs.merge(df_sess[["id","subject_id"]].rename(columns={"id":"session_id"}),
-                                  on="session_id", how="left")
-            mask = (df_abs["trainee_id"]==t["id"]) & (df_abs["subject_id"]==s["id"])
-            abs_count = int(mask.sum())
-
-        total_sess = int(s.get("total_sessions", 0))
-        mode = data["settings"].get("formula_mode","percentage")
-        if mode == "percentage":
-            p = int(data["settings"].get("percentage_allowed", 20))
-            allowed = int((total_sess * p + 99)//100)
-        else:
-            allowed = int(data["settings"].get("fixed_allowed", 3))
-        allowed = max(0, allowed)
-        remaining = max(allowed - abs_count, 0)
-
-        default_msg = (
-            f"السلام عليكم {t['name']}،\n"
-            f"بخصوص مادة: {s['name']}\n"
-            f"عدد الغيابات: {abs_count}\n"
-            f"المسموح بالغياب: {allowed}\n"
-            f"المتبقي قبل تجاوز الحد: {remaining}\n"
-            f"الرجاء الالتزام بالحضور. شكراً لتفهمكم."
-        )
-        msg = st.text_area("نص رسالة واتساب (يمكنك تعديله قبل الإرسال):", value=default_msg, height=140)
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("**إرسال للمتكوّن مباشرة**")
-            link_student = wa_link(t["phone"], msg)
-            if link_student:
-                st.markdown(f"[📲 فتح واتساب للمتكوّن]({link_student})")
+            # رسالة واتساب جاهزة
+            msg = (
+                f"سلام {tr['name']},\n"
+                f"نعلّموك بعد المتابعة إنّو ساعات الغياب الفعلية: {absent_effective:.1f} س،\n"
+                f"ونسبة الغياب من برنامجك: {pct_abs:.2f}%.\n"
+                f"باقي عندك قبل 10%: {remain_before_10:.1f} س.\n"
+                f"لو عندك شهادة طبية لأي غياب، بعثلنا نسخة.\n"
+                f"شكراً."
+            )
+            link = wa_link(tr["phone"], msg)
+            if link:
+                st.markdown(f"[📲 إرسال رسالة واتساب للمتكوّن]({link})")
             else:
-                st.caption("الهاتف غير مضبوط للمتكوّن.")
+                st.warning("رقم هاتف المتكوّن غير صالح لإرسال واتساب.")
 
-        with c2:
-            st.markdown("**إشعار للفرع (اختياري)**")
-            link_branch = wa_link(wa_num, f"تنبيه فرع {branch}:\n{msg}")
-            if wa_num and link_branch:
-                st.markdown(f"[📣 إرسال للفرع]({link_branch})")
-            else:
-                st.caption("رقم واتساب الفرع غير مضبوط.")
-
-        with c3:
-            st.markdown("**ملخص سريع**")
-            st.metric("غيابات", abs_count)
-            st.metric("المسموح", allowed)
-            st.metric("المتبقي", remaining)
+        # إدارة سريعة: حذف جلسة إن لزم
+        st.markdown("---")
+        st.subheader("🧹 إدارة سريعة للجلسات")
+        sess_all_sorted = sorted([s for s in db["sessions"] if s["trainee_id"] == tr["id"]], key=lambda x: (x["date"], x["ts"]))
+        if sess_all_sorted:
+            opts = [
+                f"{i+1}. {s['date']} — {next((x['name'] for x in db['subjects'] if x['id']==s['subject_id']), '?')} — {s['hours']}س — {'غائب' if s['is_absent'] else 'حاضر'}{' (طبي)' if s['medical'] else ''}"
+                for i,s in enumerate(sess_all_sorted)
+            ]
+            pick = st.selectbox("اختر جلسة للحذف (اختياري)", ["(لا شيء)"] + opts)
+            if pick != "(لا شيء)":
+                idx = opts.index(pick)
+                if st.button("❗ حذف الجلسة المختارة"):
+                    del_id = sess_all_sorted[idx]["id"]
+                    db["sessions"] = [s for s in db["sessions"] if s["id"] != del_id]
+                    save_db(db)
+                    st.success("تم الحذف.")
+        else:
+            st.caption("لا توجد جلسات لهذا المتكوّن بعد.")
