@@ -1,6 +1,7 @@
 # AttendanceHub.py
 # نظام غيابات/حضور للمكوّنين والمتكوّنين — تخزين محلي (attendance_db.json) — واتساب تنبيهات
-# مضاف: حقل "الاختصاص" للمتكوّن + فلترة حسب الاختصاص عند تسجيل الغياب (وأيضًا اختيارية في الخطط)
+# مضاف: حقل "الاختصاص" للمتكوّن + فلترة حسب الاختصاص عند تسجيل الغياب
+# مضاف: إدارة الغيابات (حذف/اعتبار بشهادة طبية/إلغاء الشهادة الطبية)
 
 import os, json, uuid, urllib.parse
 from datetime import datetime, date
@@ -151,7 +152,7 @@ with tab_tr:
         tdf["الاختصاص"]   = tdf.get("specialty", "")
         st.dataframe(tdf[["الاسم","الهاتف","الاختصاص"]], use_container_width=True, height=360)
 
-        # حذف
+        # 🔴 حذف متكوّن كامل (مع خططه وجلساته)
         del_key = st.selectbox("اختر متكوّن للحذف (اختياري)", ["—"] + [f"{t['name']} (+{t['phone']})" for t in tr_list])
         if del_key != "—" and st.button("🗑️ حذف المتكوّن"):
             pid = next((t["id"] for t in tr_list if f"{t['name']} (+{t['phone']})"==del_key), None)
@@ -215,7 +216,7 @@ with tab_plan:
     else:
         # فلتر اختياري بالاختصاص
         specialties = sorted({(t.get("specialty") or "").strip() for t in tr_list if (t.get("specialty") or "").strip()})
-        spec_pick = st.selectbox("فلترة حسب الاختصاص (اختياري)", ["الكل"] + specialties)
+        spec_pick = st.selectbox("فلترة حسب الاختصاص (اختياري)", ["الكل"] + specialties) if specialties else "الكل"
         tr_list_view = tr_list if spec_pick=="الكل" else [t for t in tr_list if (t.get("specialty") or "").strip()==spec_pick]
 
         if not tr_list_view:
@@ -360,6 +361,52 @@ with tab_abs:
         st.markdown("#### سجلات الغياب (الفرع)")
         st.dataframe(sdf[["التاريخ","المتكوّن","الاختصاص","المادة","ساعات الغياب","شهادة طبية","السبب"]],
                      use_container_width=True, height=360)
+
+        # ===== إدارة الغيابات (حذف / اعتبار بشهادة طبية / إلغاء الشهادة) =====
+        st.markdown("---")
+        st.markdown("### 🛠️ إدارة الغيابات")
+
+        # اختيار متكوّن (بنفس فلترة الاختصاص)
+        tr_admin_opts = {f"{t['name']} — +{t['phone']} — [{t.get('specialty','') or '-'}]": t for t in tr_branch}
+        if tr_admin_opts:
+            pick_tr_admin = st.selectbox("اختر المتكوّن لإدارة غياباته", list(tr_admin_opts.keys()))
+            tr_admin = tr_admin_opts[pick_tr_admin]
+            # جلسات المتكوّن المختار
+            tr_sess = [s for s in sessions if s["trainee_id"]==tr_admin["id"]]
+            if not tr_sess:
+                st.info("لا توجد غيابات لهذا المتكوّن.")
+            else:
+                s_df = pd.DataFrame(tr_sess)
+                s_df["عرض"] = s_df.apply(lambda r: f"{pd.to_datetime(r['date']).date()} — {sp_map.get(r['subject_id'],'-')} — {r['hours_absent']}h — {'طبي' if r.get('has_medical') else 'بدون طبي'}", axis=1)
+                # Multi-select حسب ID
+                select_ids = st.multiselect("اختر غيابات للتصرف فيها", options=list(s_df["id"]), format_func=lambda x: s_df.loc[s_df["id"]==x, "عرض"].iloc[0])
+
+                c1, c2, c3 = st.columns(3)
+                if c1.button("🗑️ حذف الغيابات المحدّدة", disabled=(len(select_ids)==0)):
+                    before = len(db["sessions"])
+                    db["sessions"] = [s for s in db["sessions"] if s["id"] not in select_ids]
+                    save_db(db)
+                    st.success(f"تم الحذف: {before - len(db['sessions'])} سجل.")
+
+                if c2.button("✅ اعتبار المحدّدة بشهادة طبية", disabled=(len(select_ids)==0)):
+                    cnt = 0
+                    for s in db["sessions"]:
+                        if s["id"] in select_ids:
+                            if not s.get("has_medical"):
+                                s["has_medical"] = True
+                                cnt += 1
+                    save_db(db)
+                    st.success(f"تم وضع شهادة طبية لعدد {cnt}.")
+
+                if c3.button("↩️ إلغاء الشهادة الطبية للمحدّدة", disabled=(len(select_ids)==0)):
+                    cnt = 0
+                    for s in db["sessions"]:
+                        if s["id"] in select_ids:
+                            if s.get("has_medical"):
+                                s["has_medical"] = False
+                                cnt += 1
+                    save_db(db)
+                    st.success(f"تم إلغاء الشهادة الطبية لعدد {cnt}.")
 
 # =========================================================
 # 📊 التقارير & 💬 واتساب
