@@ -1,16 +1,18 @@
-# streamlit_app.py — Superette Caisse (Barcode-compatible)
-# --------------------------------------------------------
+# streamlit_app.py — Superette Caisse (Barcode-compatible, Epson ESC/POS)
+# -----------------------------------------------------------------------
 # ✅ Features
 # - Scan barcodes with a USB "douchette" (acts like keyboard + Enter)
-# - Live cart with qty/price/line-total; quick +/- buttons
-# - Auto-add quantity using the pattern: 3*<barcode> (e.g., 3*6191234567890)
-# - Cash/Card/Mixed payments; cash change calculation
-# - Products & Inventory (CRUD) with stock decrement on sale
-# - Cash movements (IN/OUT) for drawer reconciliation
-# - Daily X/Z reports (summary by day, export CSV)
-# - Printable HTML receipt (download)
-# - SQLite local DB (no internet required)
-# --------------------------------------------------------
+# - Digits-only parsing (أي نص يرجّع أرقام فقط)
+# - Auto-qty: 3*<barcode>  → يضيف 3 قطع من نفس الكود
+# - Live cart + totals (Sous-total / TVA / Total)
+# - Payments: Cash / Carte / Mixte + monnaie
+# - Products CRUD + stock decrement on sale
+# - Cash movements (IN/OUT)
+# - Daily reports + CSV export
+# - HTML receipt (download)
+# - ESC/POS thermal print: Epson TM-T20/TM-T88 (USB) preset
+# - SQLite local DB
+# -----------------------------------------------------------------------
 
 import json
 import os
@@ -42,10 +44,10 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS products (
             barcode TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            price REAL NOT NULL,
-            stock REAL DEFAULT 0,
-            tva REAL DEFAULT 0 -- % TVA if needed (0..100)
+            name   TEXT NOT NULL,
+            price  REAL NOT NULL,
+            stock  REAL DEFAULT 0,
+            tva    REAL DEFAULT 0
         )
         """
     )
@@ -193,8 +195,11 @@ def init_state():
 # ---------------------- CART LOGIC ----------------------
 
 def parse_quantity_barcode(s: str) -> Tuple[float, str]:
+    """
+    يدعم: 3*<code> → كمية 3.
+    ويرجّع من الكود أرقام فقط (يحذف أي حروف/رموز).
+    """
     s = s.strip()
-    # Allow pattern like 3*<code> to set quantity. Keep digits only from code.
     if "*" in s:
         q_str, bc = s.split("*", 1)
         try:
@@ -203,7 +208,6 @@ def parse_quantity_barcode(s: str) -> Tuple[float, str]:
             q = 1.0
         digits = "".join(ch for ch in str(bc) if ch.isdigit())
         return (q if q > 0 else 1.0, digits)
-    # No quantity prefix: use 1 and digits only from entire string
     digits = "".join(ch for ch in str(s) if ch.isdigit())
     return (1.0, digits or s)
 
@@ -254,7 +258,7 @@ def cart_totals(cart: Dict[str, Dict]) -> Tuple[float, float, float]:
     return subtotal, tva_total, total
 
 
-# ---------------------- RECEIPT ----------------------
+# ---------------------- RECEIPT (HTML) ----------------------
 
 def render_receipt_html(sale_id: int, items: List[Dict], subtotal: float, tva_total: float, total: float,
                         paid_cash: float, paid_card: float, change: float, store_name: str, store_addr: str) -> str:
@@ -298,9 +302,81 @@ def render_receipt_html(sale_id: int, items: List[Dict], subtotal: float, tva_to
     return html
 
 
+# ---------------------- ESC/POS PRINTING ----------------------
+try:
+    from escpos.printer import Usb, Serial, Network
+    ESC_POS_AVAILABLE = True
+except Exception:
+    ESC_POS_AVAILABLE = False
+
+
+def get_escpos_printer():
+    """Build and return an ESC/POS printer instance from sidebar settings."""
+    if not ESC_POS_AVAILABLE:
+        raise RuntimeError("python-escpos غير مثبّت. ثبّت: pip install python-escpos")
+    mode = st.session_state.get("printer_mode", "USB")
+    if mode == "USB":
+        # Default to Epson TM-T20/TM-T88 IDs (can be changed from sidebar)
+        vid = int(str(st.session_state.get("usb_vid", "0x04b8")).replace("0x", ""), 16)
+        pid = int(str(st.session_state.get("usb_pid", "0x0e15")).replace("0x", ""), 16)
+        in_ep = st.session_state.get("usb_in_ep") or None
+        out_ep = st.session_state.get("usb_out_ep") or None
+        return Usb(vid, pid, in_ep=in_ep, out_ep=out_ep)
+    elif mode == "Network":
+        host = st.session_state.get("net_host", "192.168.0.123")
+        port = int(st.session_state.get("net_port", 9100))
+        return Network(host, port=port, timeout=3)
+    elif mode == "Serial":
+        dev = st.session_state.get("ser_dev", "/dev/ttyUSB0")
+        baud = int(st.session_state.get("ser_baud", 9600))
+        return Serial(devfile=dev, baudrate=baud)
+    else:
+        raise RuntimeError("وضع الطابعة غير مفعّل.")
+
+
+def print_ticket_thermal(items, subtotal, tva_total, total, paid_cash, paid_card, change, store_name, store_addr):
+    """Send formatted receipt to ESC/POS thermal printer according to selected mode."""
+    if not st.session_state.get("print_enabled", False):
+        return
+    try:
+        p = get_escpos_printer()
+        # Header
+        p.set(align='center', bold=True)
+        p.textln(store_name)
+        p.textln(store_addr)
+        p.textln(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        p.textln("-" * 32)
+        # Body
+        p.set(align='left', bold=False)
+        for it in items:
+            name = (it['name'] or '')[:20]
+            qty = it['qty']
+            price = it['price']
+            p.textln(f"{name:20} {qty:>4.0f} x {price:>7.3f}")
+        p.textln("-" * 32)
+        p.set(bold=True)
+        p.textln(f"Sous-total: {subtotal:.3f} TND")
+        p.textln(f"TVA:        {tva_total:.3f} TND")
+        p.textln(f"TOTAL:      {total:.3f} TND")
+        p.textln("-" * 32)
+        p.set(bold=False)
+        p.textln(f"Cash:   {paid_cash:.3f}")
+        p.textln(f"Carte:  {paid_card:.3f}")
+        p.textln(f"Rendu:  {change:.3f}")
+        p.textln("-" * 32)
+        p.set(align='center')
+        p.textln("Merci et à bientôt!")
+        p.cut()
+        try:
+            p.close()
+        except Exception:
+            pass
+        st.success("🖨️ تمّت الطباعة على الطابعة الحرارية.")
+    except Exception as e:
+        st.error(f"⚠️ خطأ في الطباعة الحرارية: {e}")
+
+
 # ---------------------- PAGES ----------------------
-
-
 
 def page_caisse():
     st.header("🧾 Caisse — Vente")
@@ -319,9 +395,12 @@ def page_caisse():
         if not st.session_state.cart:
             st.info("Panier vide — scannez un article.")
         else:
-            df = pd.DataFrame.from_records(list(st.session_state.cart.values()))
-            df["total_ligne"] = df["qty"] * df["price"]
-            st.dataframe(df[["barcode", "name", "qty", "price", "tva", "total_ligne"]], use_container_width=True)
+            vals = list(st.session_state.cart.values())
+            df = pd.DataFrame(vals) if vals else pd.DataFrame(columns=["barcode","name","qty","price","tva","total_ligne"])
+            if not df.empty:
+                df["total_ligne"] = df["qty"] * df["price"]
+            st.dataframe(df[["barcode", "name", "qty", "price", "tva", "total_ligne"]] if not df.empty else df,
+                         use_container_width=True)
 
             # qty controls
             c1, c2, c3 = st.columns(3)
@@ -398,11 +477,13 @@ def page_caisse():
                     st.success(f"Vente #{sale_id} enregistrée. Monnaie: {change:.3f} TND")
 
                     # Thermal print (optional)
+                    store_name = st.session_state.get("store_name", "MA SUPERETTE")
+                    store_addr = st.session_state.get("store_addr", "Adresse .. Téléphone ..")
                     print_ticket_thermal(items, subtotal, tva_total, total,
                                          float(paid_cash or 0), float(paid_card or 0), float(change),
                                          store_name, store_addr)
 
-                    # Receipt (HTML download) option
+                    # HTML receipt download
                     html = render_receipt_html(
                         sale_id, items, subtotal, tva_total, total,
                         float(paid_cash or 0), float(paid_card or 0), float(change),
@@ -416,7 +497,6 @@ def page_caisse():
                         use_container_width=True,
                     )
                     st.session_state.cart = {}
-
 
 
 def page_products():
@@ -445,7 +525,6 @@ def page_products():
                 st.success("Produit enregistré.")
 
 
-
 def page_cash_movements():
     st.header("💵 Mouvements de caisse")
     c1, c2 = st.columns(2)
@@ -464,7 +543,6 @@ def page_cash_movements():
         df = pd.read_sql_query("SELECT * FROM cash_movements ORDER BY ts DESC", conn)
         conn.close()
         st.dataframe(df, use_container_width=True)
-
 
 
 def page_reports():
@@ -515,79 +593,6 @@ def page_reports():
         st.metric("Solde net mouvements", f"{solde:.3f} TND")
 
 
-# ---------------------- ESC/POS PRINTING ----------------------
-try:
-    from escpos.printer import Usb, Serial, Network
-    ESC_POS_AVAILABLE = True
-except Exception:
-    ESC_POS_AVAILABLE = False
-
-
-def get_escpos_printer():
-    """Build and return an ESC/POS printer instance from sidebar settings."""
-    if not ESC_POS_AVAILABLE:
-        raise RuntimeError("python-escpos غير مثبّت. ثبّت: pip install python-escpos")
-    mode = st.session_state.get("printer_mode", "None")
-    if mode == "USB":
-        vid = int(str(st.session_state.get("usb_vid", "0x0")).replace("0x", ""), 16)
-        pid = int(str(st.session_state.get("usb_pid", "0x0")).replace("0x", ""), 16)
-        in_ep = st.session_state.get("usb_in_ep") or None
-        out_ep = st.session_state.get("usb_out_ep") or None
-        return Usb(vid, pid, in_ep=in_ep, out_ep=out_ep)
-    elif mode == "Network":
-        host = st.session_state.get("net_host", "192.168.0.123")
-        port = int(st.session_state.get("net_port", 9100))
-        return Network(host, port=port, timeout=3)
-    elif mode == "Serial":
-        dev = st.session_state.get("ser_dev", "/dev/ttyUSB0")
-        baud = int(st.session_state.get("ser_baud", 9600))
-        return Serial(devfile=dev, baudrate=baud)
-    else:
-        raise RuntimeError("وضع الطابعة غير مفعّل.")
-
-
-def print_ticket_thermal(items, subtotal, tva_total, total, paid_cash, paid_card, change, store_name, store_addr):
-    """Send formatted receipt to ESC/POS thermal printer according to selected mode."""
-    if not st.session_state.get("print_enabled", False):
-        return
-    try:
-        p = get_escpos_printer()
-        # Header
-        p.set(align='center', bold=True)
-        p.textln(store_name)
-        p.textln(store_addr)
-        p.textln(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        p.textln("-" * 32)
-        # Body
-        p.set(align='left', bold=False)
-        for it in items:
-            name = (it['name'] or '')[:20]
-            qty = it['qty']
-            price = it['price']
-            p.textln(f"{name:20} {qty:>4.0f} x {price:>7.3f}")
-        p.textln("-" * 32)
-        p.set(bold=True)
-        p.textln(f"Sous-total: {subtotal:.3f} TND")
-        p.textln(f"TVA:        {tva_total:.3f} TND")
-        p.textln(f"TOTAL:      {total:.3f} TND")
-        p.textln("-" * 32)
-        p.set(bold=False)
-        p.textln(f"Cash:   {paid_cash:.3f}")
-        p.textln(f"Carte:  {paid_card:.3f}")
-        p.textln(f"Rendu:  {change:.3f}")
-        p.textln("-" * 32)
-        p.set(align='center')
-        p.textln("Merci et à bientôt!")
-        p.cut()
-        try:
-            p.close()
-        except Exception:
-            pass
-        st.success("🖨️ تمّت الطباعة على الطابعة الحرارية.")
-    except Exception as e:
-        st.error(f"⚠️ خطأ في الطباعة الحرارية: {e}")
-
-
 # ---------------------- MAIN APP ----------------------
 
 def config_sidebar():
@@ -599,17 +604,21 @@ def config_sidebar():
     st.sidebar.subheader("🖨️ Impression thermique (ESC/POS)")
     if not ESC_POS_AVAILABLE:
         st.sidebar.warning("python-escpos غير مثبّت. نفّذ: pip install python-escpos")
-    # Preset
+    # Preset: Epson USB
     preset = st.sidebar.selectbox("Preset", ["Epson TM-T20/TM-T88 (USB)", "Aucun"], index=0)
     st.session_state.print_enabled = st.sidebar.checkbox("تفعيل الطباعة الحرارية", value=st.session_state.get("print_enabled", False))
-    st.session_state.printer_mode = st.sidebar.selectbox("وضع الاتصال", ["USB", "Network", "Serial", "None"], index=["USB","Network","Serial","None"].index(st.session_state.get("printer_mode", "USB")))
+    st.session_state.printer_mode = st.sidebar.selectbox(
+        "وضع الاتصال",
+        ["USB", "Network", "Serial", "None"],
+        index=["USB","Network","Serial","None"].index(st.session_state.get("printer_mode", "USB"))
+    )
 
     mode = st.session_state.printer_mode
     if mode == "USB":
-        # Apply preset defaults for Epson
+        # Apply Epson defaults if preset chosen
         if preset == "Epson TM-T20/TM-T88 (USB)":
-            st.session_state["usb_vid"] = "0x04b8"
-            st.session_state["usb_pid"] = "0x0e15"
+            st.session_state["usb_vid"] = st.session_state.get("usb_vid", "0x04b8")
+            st.session_state["usb_pid"] = st.session_state.get("usb_pid", "0x0e15")
         st.session_state.usb_vid = st.sidebar.text_input("USB Vendor ID", value=st.session_state.get("usb_vid", "0x04b8"))
         st.session_state.usb_pid = st.sidebar.text_input("USB Product ID", value=st.session_state.get("usb_pid", "0x0e15"))
         st.session_state.usb_in_ep = st.sidebar.text_input("IN endpoint (optionnel)", value=st.session_state.get("usb_in_ep", ""))
@@ -625,17 +634,18 @@ def config_sidebar():
     with colA:
         if st.button("🧪 Test print", use_container_width=True):
             try:
-                print_ticket_thermal([
-                    {"name": "Test Item", "qty": 1, "price": 1.000},
-                ], 1.000, 0.000, 1.000, 1.000, 0.000, 0.000, st.session_state.get("store_name",""), st.session_state.get("store_addr",""))
+                print_ticket_thermal(
+                    [{"name": "Test Item", "qty": 1, "price": 1.000}],
+                    1.000, 0.000, 1.000, 1.000, 0.000, 0.000,
+                    st.session_state.get("store_name",""), st.session_state.get("store_addr","")
+                )
             except Exception as e:
                 st.error(f"فشل الاختبار: {e}")
     with colB:
-        st.sidebar.caption("Astuce: gardez le focus sur la zone de scan toute la journée.")("Astuce: gardez le focus sur la zone de scan toute la journée.")
+        st.sidebar.caption("Astuce: gardez le focus sur la zone de scan toute la journée.")
 
 
 def main():
-    # (set_page_config تمّ النداء عليه في الأعلى) 
     init_db()
     init_state()
 
@@ -655,7 +665,7 @@ def main():
         page_reports()
 
 
-# --- Safe runner: surface exceptions in the UI instead of a white page ---
+# --- Safe runner: surface exceptions instead of a white page ---
 if __name__ == "__main__":
     try:
         main()
