@@ -3,7 +3,7 @@
 # ✅ Features
 # - Scan barcodes with a USB "douchette" (acts like keyboard + Enter)
 # - Digits-only parsing (أي نص يرجّع أرقام فقط)
-# - Auto-qty: 3*<barcode>  → يضيف 3 قطع من نفس الكود
+# - Auto-qty: 3*<barcode>
 # - Live cart + totals (Sous-total / TVA / Total)
 # - Payments: Cash / Carte / Mixte + monnaie
 # - Products CRUD + stock decrement on sale
@@ -395,12 +395,13 @@ def page_caisse():
         if not st.session_state.cart:
             st.info("Panier vide — scannez un article.")
         else:
-            vals = list(st.session_state.cart.values())
+            vals = list(st.session_state.cart.values())  # ← حل مشكلة dict_values
             df = pd.DataFrame(vals) if vals else pd.DataFrame(columns=["barcode","name","qty","price","tva","total_ligne"])
             if not df.empty:
                 df["total_ligne"] = df["qty"] * df["price"]
-            st.dataframe(df[["barcode", "name", "qty", "price", "tva", "total_ligne"]] if not df.empty else df,
-                         use_container_width=True)
+                st.dataframe(df[["barcode", "name", "qty", "price", "tva", "total_ligne"]], use_container_width=True)
+            else:
+                st.dataframe(df, use_container_width=True)
 
             # qty controls
             c1, c2, c3 = st.columns(3)
@@ -461,15 +462,9 @@ def page_caisse():
                     change = max(0.0, paid_cash - max(0.0, total - paid_card))
                     items = list(st.session_state.cart.values())
                     sale_id = record_sale(
-                        items,
-                        subtotal,
-                        tva_total,
-                        total,
-                        float(paid_cash or 0),
-                        float(paid_card or 0),
-                        float(change),
-                        pay_method,
-                        note,
+                        items, subtotal, tva_total, total,
+                        float(paid_cash or 0), float(paid_card or 0), float(change),
+                        pay_method, note,
                     )
                     adjust_stock(items)
                     if paid_cash:
@@ -615,7 +610,6 @@ def config_sidebar():
 
     mode = st.session_state.printer_mode
     if mode == "USB":
-        # Apply Epson defaults if preset chosen
         if preset == "Epson TM-T20/TM-T88 (USB)":
             st.session_state["usb_vid"] = st.session_state.get("usb_vid", "0x04b8")
             st.session_state["usb_pid"] = st.session_state.get("usb_pid", "0x0e15")
