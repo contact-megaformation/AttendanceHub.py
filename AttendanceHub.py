@@ -1,669 +1,547 @@
-# streamlit_app.py — Superette Caisse (Barcode-compatible, Epson ESC/POS)
-# -----------------------------------------------------------------------
-# ✅ Features
-# - Scan barcodes with a USB "douchette" (acts like keyboard + Enter)
-# - Digits-only parsing (أي نص يرجّع أرقام فقط)
-# - Auto-qty: 3*<barcode>
-# - Live cart + totals (Sous-total / TVA / Total)
-# - Payments: Cash / Carte / Mixte + monnaie
-# - Products CRUD + stock decrement on sale
-# - Cash movements (IN/OUT)
-# - Daily reports + CSV export
-# - HTML receipt (download)
-# - ESC/POS thermal print: Epson TM-T20/TM-T88 (USB) preset
-# - SQLite local DB
-# -----------------------------------------------------------------------
+# AttendanceHub.py
+# نظام غيابات/حضور للمكوّنين والمتكوّنين — تخزين محلي (attendance_db.json) — واتساب تنبيهات
+# جديد: هاتف الولي + اختيار الإرسال للتلميذ أو الولي
+# الغياب المُؤشّر "بشهادة طبية" لا يُحتسب ضمن نسبة 10%
 
-import json
-import os
-import sqlite3
+import os, json, uuid, urllib.parse
 from datetime import datetime, date
-from typing import Dict, List, Tuple
+from typing import Dict, Any, List
 
-import pandas as pd
 import streamlit as st
+import pandas as pd
 
-# --- Page config early to avoid blank pages ---
-st.set_page_config(page_title="Caisse Superette (Barcode)", layout="wide", initial_sidebar_state="expanded")
+# ---------------- إعداد الصفحة ----------------
+st.set_page_config(page_title="Attendance Hub", layout="wide")
+st.markdown("""
+<div style='text-align:center'>
+  <h1>📝 Attendance Hub — إدارة الغيابات والحضور</h1>
+  <p>متكوّنون 👥 | مواد 📚 | خطط ساعات ⏱️ | غيابات 🚫 | تقارير & واتساب 💬</p>
+</div>
+<hr/>
+""", unsafe_allow_html=True)
 
-DB_PATH = os.environ.get("CAISSE_DB", "caisse_superette.db")
+# ---------------- ثوابت/فروع ----------------
+BRANCHES = ["Menzel Bourguiba", "Bizerte"]
+ABSENCE_THRESHOLD_PCT = 0.10  # 10%
 
-# ---------------------- DB LAYER ----------------------
+# ---------------- التخزين المحلي ----------------
+ROOT_DIR = os.getcwd()
+DB_PATH  = os.path.join(ROOT_DIR, "attendance_db.json")
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+def ensure_store():
+    if not os.path.exists(DB_PATH):
+        init = {
+            "trainees": [],   # {id,name,phone,guardian_phone,branch,specialty}
+            "subjects": [],   # {id,name,branch}
+            "plans": [],      # {id,trainee_id,subject_id,total_hours,weekly_hours,branch}
+            "sessions": []    # {id,trainee_id,subject_id,date,hours_absent,reason,has_medical,branch}
+        }
+        save_db(init)
 
+def load_db() -> Dict[str, Any]:
+    ensure_store()
+    with open(DB_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # ترقية قديمة: لو ما فمّاش guardian_phone أضِفه فاضيًا
+    for t in data.get("trainees", []):
+        t.setdefault("guardian_phone", "")
+        t.setdefault("specialty", "")
+    return data
 
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
+def save_db(db: Dict[str, Any]):
+    tmp = DB_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, DB_PATH)
 
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS products (
-            barcode TEXT PRIMARY KEY,
-            name   TEXT NOT NULL,
-            price  REAL NOT NULL,
-            stock  REAL DEFAULT 0,
-            tva    REAL DEFAULT 0
-        )
-        """
-    )
-
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sales (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            items_json TEXT NOT NULL,
-            subtotal REAL NOT NULL,
-            tva_total REAL NOT NULL,
-            total REAL NOT NULL,
-            paid_cash REAL DEFAULT 0,
-            paid_card REAL DEFAULT 0,
-            change REAL DEFAULT 0,
-            payment_method TEXT NOT NULL,
-            note TEXT
-        )
-        """
-    )
-
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cash_movements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            type TEXT NOT NULL, -- IN or OUT
-            amount REAL NOT NULL,
-            reason TEXT
-        )
-        """
-    )
-
-    conn.commit()
-    conn.close()
-
-
-# ---------------------- HELPERS ----------------------
-
-@st.cache_data(show_spinner=False)
-def _products_df_cache():
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM products ORDER BY name", conn)
-    conn.close()
-    return df
-
-
-def refresh_products_cache():
-    _products_df_cache.clear()
-
-
-def find_product(barcode: str):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT * FROM products WHERE barcode = ?", (barcode,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-
-def upsert_product(barcode: str, name: str, price: float, stock: float, tva: float = 0):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT INTO products (barcode, name, price, stock, tva)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(barcode) DO UPDATE SET
-            name=excluded.name,
-            price=excluded.price,
-            stock=excluded.stock,
-            tva=excluded.tva
-        """,
-        (barcode, name, price, stock, tva),
-    )
-    conn.commit()
-    conn.close()
-    refresh_products_cache()
-
-
-def adjust_stock(items: List[Dict[str, float]]):
-    conn = get_conn()
-    c = conn.cursor()
-    for it in items:
-        c.execute(
-            "UPDATE products SET stock = COALESCE(stock,0) - ? WHERE barcode = ?",
-            (it["qty"], it["barcode"]),
-        )
-    conn.commit()
-    conn.close()
-    refresh_products_cache()
-
-
-def record_cash_movement(mtype: str, amount: float, reason: str = ""):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO cash_movements (ts, type, amount, reason) VALUES (?, ?, ?, ?)",
-        (datetime.now().isoformat(timespec="seconds"), mtype, amount, reason),
-    )
-    conn.commit()
-    conn.close()
-
-
-def record_sale(items: List[Dict], subtotal: float, tva_total: float, total: float,
-                paid_cash: float, paid_card: float, change: float, payment_method: str, note: str = "") -> int:
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute(
-        """
-        INSERT INTO sales (ts, items_json, subtotal, tva_total, total, paid_cash, paid_card, change, payment_method, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            datetime.now().isoformat(timespec="seconds"),
-            json.dumps(items, ensure_ascii=False),
-            subtotal,
-            tva_total,
-            total,
-            paid_cash,
-            paid_card,
-            change,
-            payment_method,
-            note,
-        ),
-    )
-    sale_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return sale_id
-
-
-# ---------------------- UI STATE ----------------------
-
-def init_state():
-    if "cart" not in st.session_state:
-        st.session_state.cart = {}  # barcode -> {name, price, tva, qty}
-    if "barcode_input" not in st.session_state:
-        st.session_state.barcode_input = ""
-    if "auto_qty" not in st.session_state:
-        st.session_state.auto_qty = 1
-
-
-# ---------------------- CART LOGIC ----------------------
-
-def parse_quantity_barcode(s: str) -> Tuple[float, str]:
-    """
-    يدعم: 3*<code> → كمية 3.
-    ويرجّع من الكود أرقام فقط (يحذف أي حروف/رموز).
-    """
-    s = s.strip()
-    if "*" in s:
-        q_str, bc = s.split("*", 1)
-        try:
-            q = float(q_str.replace(",", "."))
-        except Exception:
-            q = 1.0
-        digits = "".join(ch for ch in str(bc) if ch.isdigit())
-        return (q if q > 0 else 1.0, digits)
-    digits = "".join(ch for ch in str(s) if ch.isdigit())
-    return (1.0, digits or s)
-
-
-def add_scan_to_cart():
-    raw = st.session_state.get("barcode_input", "").strip()
-    if not raw:
-        return
-    qty, bc = parse_quantity_barcode(raw)
-
-    row = find_product(bc)
-    if row is None:
-        # Unknown product: ask for quick add
-        with st.sidebar:
-            st.warning(f"Barcode inconnu: {bc}")
-            with st.expander("Ajouter produit rapide"):
-                name = st.text_input("Nom", key=f"quick_name_{bc}")
-                price = st.number_input("Prix (TND)", min_value=0.0, step=0.1, key=f"quick_price_{bc}")
-                tva = st.number_input("TVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0, key=f"quick_tva_{bc}")
-                stock = st.number_input("Stock initial", min_value=0.0, step=1.0, value=0.0, key=f"quick_stk_{bc}")
-                if st.button("Enregistrer produit", key=f"quick_save_{bc}"):
-                    upsert_product(bc, name or f"Prod {bc}", float(price), float(stock), float(tva))
-                    st.success("Produit ajouté. Re-scanner pour ajouter au panier.")
-    else:
-        bc = row["barcode"]
-        if bc not in st.session_state.cart:
-            st.session_state.cart[bc] = {
-                "barcode": bc,
-                "name": row["name"],
-                "price": float(row["price"]),
-                "tva": float(row["tva"] or 0.0),
-                "qty": 0.0,
-            }
-        st.session_state.cart[bc]["qty"] += max(qty, 0.0)
-    # clear input to be ready for next scan
-    st.session_state.barcode_input = ""
-
-
-def cart_totals(cart: Dict[str, Dict]) -> Tuple[float, float, float]:
-    subtotal = 0.0
-    tva_total = 0.0
-    for it in cart.values():
-        line_ht = it["price"] * it["qty"]
-        line_tva = line_ht * (it["tva"] / 100.0)
-        subtotal += line_ht
-        tva_total += line_tva
-    total = subtotal + tva_total
-    return subtotal, tva_total, total
-
-
-# ---------------------- RECEIPT (HTML) ----------------------
-
-def render_receipt_html(sale_id: int, items: List[Dict], subtotal: float, tva_total: float, total: float,
-                        paid_cash: float, paid_card: float, change: float, store_name: str, store_addr: str) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = "".join(
-        f"<tr><td>{it['name']}</td><td style='text-align:right'>{it['qty']}</td><td style='text-align:right'>{it['price']:.3f}</td><td style='text-align:right'>{(it['qty']*it['price']):.3f}</td></tr>"
-        for it in items
-    )
-    html = f"""
-    <html>
-    <head>
-      <meta charset='utf-8'/>
-      <style>
-        body {{ font-family: monospace; width: 280px; margin: 0 auto; }}
-        h2, h4 {{ text-align: center; margin: 4px 0; }}
-        table {{ width: 100%; border-collapse: collapse; }}
-        td {{ padding: 2px 0; font-size: 12px; }}
-        .totals td {{ font-weight: bold; }}
-        hr {{ border: 0; border-top: 1px dashed #aaa; margin: 6px 0; }}
-      </style>
-    </head>
-    <body>
-      <h2>{store_name}</h2>
-      <h4>{store_addr}</h4>
-      <hr/>
-      <div>Ticket N° {sale_id} — {now}</div>
-      <table>
-        {rows}
-        <tr class='totals'><td>Sous-total</td><td></td><td></td><td style='text-align:right'>{subtotal:.3f}</td></tr>
-        <tr class='totals'><td>TVA</td><td></td><td></td><td style='text-align:right'>{tva_total:.3f}</td></tr>
-        <tr class='totals'><td>Total</td><td></td><td></td><td style='text-align:right'>{total:.3f}</td></tr>
-        <tr><td>Cash</td><td></td><td></td><td style='text-align:right'>{paid_cash:.3f}</td></tr>
-        <tr><td>Carte</td><td></td><td></td><td style='text-align:right'>{paid_card:.3f}</td></tr>
-        <tr><td>Monnaie</td><td></td><td></td><td style='text-align:right'>{change:.3f}</td></tr>
-      </table>
-      <hr/>
-      <div style='text-align:center'>Merci et à bientôt!</div>
-    </body>
-    </html>
-    """
-    return html
-
-
-# ---------------------- ESC/POS PRINTING ----------------------
-try:
-    from escpos.printer import Usb, Serial, Network
-    ESC_POS_AVAILABLE = True
-except Exception:
-    ESC_POS_AVAILABLE = False
-
-
-def get_escpos_printer():
-    """Build and return an ESC/POS printer instance from sidebar settings."""
-    if not ESC_POS_AVAILABLE:
-        raise RuntimeError("python-escpos غير مثبّت. ثبّت: pip install python-escpos")
-    mode = st.session_state.get("printer_mode", "USB")
-    if mode == "USB":
-        # Default to Epson TM-T20/TM-T88 IDs (can be changed from sidebar)
-        vid = int(str(st.session_state.get("usb_vid", "0x04b8")).replace("0x", ""), 16)
-        pid = int(str(st.session_state.get("usb_pid", "0x0e15")).replace("0x", ""), 16)
-        in_ep = st.session_state.get("usb_in_ep") or None
-        out_ep = st.session_state.get("usb_out_ep") or None
-        return Usb(vid, pid, in_ep=in_ep, out_ep=out_ep)
-    elif mode == "Network":
-        host = st.session_state.get("net_host", "192.168.0.123")
-        port = int(st.session_state.get("net_port", 9100))
-        return Network(host, port=port, timeout=3)
-    elif mode == "Serial":
-        dev = st.session_state.get("ser_dev", "/dev/ttyUSB0")
-        baud = int(st.session_state.get("ser_baud", 9600))
-        return Serial(devfile=dev, baudrate=baud)
-    else:
-        raise RuntimeError("وضع الطابعة غير مفعّل.")
-
-
-def print_ticket_thermal(items, subtotal, tva_total, total, paid_cash, paid_card, change, store_name, store_addr):
-    """Send formatted receipt to ESC/POS thermal printer according to selected mode."""
-    if not st.session_state.get("print_enabled", False):
-        return
+# ---------------- أسرار اختيارية ----------------
+def branch_password(branch: str) -> str:
     try:
-        p = get_escpos_printer()
-        # Header
-        p.set(align='center', bold=True)
-        p.textln(store_name)
-        p.textln(store_addr)
-        p.textln(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        p.textln("-" * 32)
-        # Body
-        p.set(align='left', bold=False)
-        for it in items:
-            name = (it['name'] or '')[:20]
-            qty = it['qty']
-            price = it['price']
-            p.textln(f"{name:20} {qty:>4.0f} x {price:>7.3f}")
-        p.textln("-" * 32)
-        p.set(bold=True)
-        p.textln(f"Sous-total: {subtotal:.3f} TND")
-        p.textln(f"TVA:        {tva_total:.3f} TND")
-        p.textln(f"TOTAL:      {total:.3f} TND")
-        p.textln("-" * 32)
-        p.set(bold=False)
-        p.textln(f"Cash:   {paid_cash:.3f}")
-        p.textln(f"Carte:  {paid_card:.3f}")
-        p.textln(f"Rendu:  {change:.3f}")
-        p.textln("-" * 32)
-        p.set(align='center')
-        p.textln("Merci et à bientôt!")
-        p.cut()
-        try:
-            p.close()
-        except Exception:
-            pass
-        st.success("🖨️ تمّت الطباعة على الطابعة الحرارية.")
-    except Exception as e:
-        st.error(f"⚠️ خطأ في الطباعة الحرارية: {e}")
+        m = st.secrets["branch_passwords"]
+        if "Menzel" in branch or branch == "MB": return str(m.get("MB",""))
+        if "Bizerte" in branch or branch == "BZ": return str(m.get("BZ",""))
+    except Exception:
+        pass
+    return ""
 
-
-# ---------------------- PAGES ----------------------
-
-def page_caisse():
-    st.header("🧾 Caisse — Vente")
-    colL, colR = st.columns([2, 1])
-
-    with colL:
-        st.caption("Scannez un code-barres (la douchette écrit le texte et tape Enter). Pour quantité: 3*<barcode>.")
-        st.text_input(
-            "Scan / Saisie code-barres",
-            key="barcode_input",
-            placeholder="ex: 6191234567890 ou 2*6191234567890",
-            on_change=add_scan_to_cart,
-        )
-
-        # Cart table
-        if not st.session_state.cart:
-            st.info("Panier vide — scannez un article.")
-        else:
-            vals = list(st.session_state.cart.values())  # ← حل مشكلة dict_values
-            df = pd.DataFrame(vals) if vals else pd.DataFrame(columns=["barcode","name","qty","price","tva","total_ligne"])
-            if not df.empty:
-                df["total_ligne"] = df["qty"] * df["price"]
-                st.dataframe(df[["barcode", "name", "qty", "price", "tva", "total_ligne"]], use_container_width=True)
-            else:
-                st.dataframe(df, use_container_width=True)
-
-            # qty controls
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                bc_minus = st.text_input("- Qte (barcode)", key="minus_bc", placeholder="code-barres")
-                if st.button("−1") and bc_minus in st.session_state.cart:
-                    st.session_state.cart[bc_minus]["qty"] = max(0.0, st.session_state.cart[bc_minus]["qty"] - 1)
-                    if st.session_state.cart[bc_minus]["qty"] == 0:
-                        st.session_state.cart.pop(bc_minus)
-            with c2:
-                bc_plus = st.text_input("+ Qte (barcode)", key="plus_bc", placeholder="code-barres")
-                if st.button("+1") and bc_plus:
-                    if bc_plus in st.session_state.cart:
-                        st.session_state.cart[bc_plus]["qty"] += 1
-                    else:
-                        row = find_product(bc_plus)
-                        if row:
-                            st.session_state.cart[bc_plus] = {
-                                "barcode": bc_plus,
-                                "name": row["name"],
-                                "price": float(row["price"]),
-                                "tva": float(row["tva"] or 0.0),
-                                "qty": 1.0,
-                            }
-            with c3:
-                if st.button("🗑️ Vider panier"):
-                    st.session_state.cart = {}
-
-    with colR:
-        subtotal, tva_total, total = cart_totals(st.session_state.cart)
-        st.metric("Sous-total", f"{subtotal:.3f} TND")
-        st.metric("TVA", f"{tva_total:.3f} TND")
-        st.metric("Total", f"{total:.3f} TND")
-
-        st.divider()
-        st.subheader("Paiement")
-        pay_method = st.selectbox("Méthode", ["Cash", "Carte", "Mixte"], index=0)
-        paid_cash = 0.0
-        paid_card = 0.0
-        if pay_method == "Cash":
-            paid_cash = st.number_input("Montant cash", min_value=0.0, step=1.0, value=float(total))
-        elif pay_method == "Carte":
-            paid_card = st.number_input("Montant carte", min_value=0.0, step=1.0, value=float(total))
-        else:
-            paid_cash = st.number_input("Cash", min_value=0.0, step=1.0, value=0.0)
-            paid_card = st.number_input("Carte", min_value=0.0, step=1.0, value=float(total))
-
-        note = st.text_input("Note (optionnel)")
-
-        if st.button("✅ Encaisser", use_container_width=True, disabled=(total <= 0)):
-            if total <= 0 or not st.session_state.cart:
-                st.warning("Panier vide.")
-            else:
-                paid_total = (paid_cash or 0) + (paid_card or 0)
-                if paid_total + 1e-9 < total:
-                    st.error("Montant payé insuffisant.")
-                else:
-                    change = max(0.0, paid_cash - max(0.0, total - paid_card))
-                    items = list(st.session_state.cart.values())
-                    sale_id = record_sale(
-                        items, subtotal, tva_total, total,
-                        float(paid_cash or 0), float(paid_card or 0), float(change),
-                        pay_method, note,
-                    )
-                    adjust_stock(items)
-                    if paid_cash:
-                        record_cash_movement("IN", float(paid_cash), f"Vente #{sale_id}")
-                    st.success(f"Vente #{sale_id} enregistrée. Monnaie: {change:.3f} TND")
-
-                    # Thermal print (optional)
-                    store_name = st.session_state.get("store_name", "MA SUPERETTE")
-                    store_addr = st.session_state.get("store_addr", "Adresse .. Téléphone ..")
-                    print_ticket_thermal(items, subtotal, tva_total, total,
-                                         float(paid_cash or 0), float(paid_card or 0), float(change),
-                                         store_name, store_addr)
-
-                    # HTML receipt download
-                    html = render_receipt_html(
-                        sale_id, items, subtotal, tva_total, total,
-                        float(paid_cash or 0), float(paid_card or 0), float(change),
-                        store_name, store_addr
-                    )
-                    st.download_button(
-                        "🖨️ Télécharger ticket (HTML)",
-                        data=html,
-                        file_name=f"ticket_{sale_id}.html",
-                        mime="text/html",
-                        use_container_width=True,
-                    )
-                    st.session_state.cart = {}
-
-
-def page_products():
-    st.header("📦 Produits & Stock")
-
-    # List
-    df = _products_df_cache()
-    st.dataframe(df, use_container_width=True)
-
-    st.subheader("Ajouter / Modifier produit")
-    with st.form("prod_form", clear_on_submit=True):
-        c1, c2 = st.columns([2, 3])
-        with c1:
-            barcode = st.text_input("Code-barres", placeholder="ex: 6191234567890", help="Scannez avec la douchette ici")
-            price = st.number_input("Prix (TND)", min_value=0.0, step=0.1)
-            stock = st.number_input("Stock", min_value=0.0, step=1.0)
-        with c2:
-            name = st.text_input("Nom du produit")
-            tva = st.number_input("TVA %", min_value=0.0, max_value=100.0, step=1.0, value=0.0)
-        submitted = st.form_submit_button("Enregistrer produit")
-        if submitted:
-            if not barcode or not name:
-                st.error("Code-barres et Nom sont obligatoires.")
-            else:
-                upsert_product(barcode.strip(), name.strip(), float(price), float(stock), float(tva))
-                st.success("Produit enregistré.")
-
-
-def page_cash_movements():
-    st.header("💵 Mouvements de caisse")
-    c1, c2 = st.columns(2)
-    with c1:
-        mtype = st.selectbox("Type", ["IN", "OUT"])
-        amount = st.number_input("Montant", min_value=0.0, step=1.0)
-        reason = st.text_input("Motif")
-        if st.button("Ajouter mouvement"):
-            if amount <= 0:
-                st.error("Montant invalide")
-            else:
-                record_cash_movement(mtype, float(amount), reason)
-                st.success("Mouvement enregistré.")
-    with c2:
-        conn = get_conn()
-        df = pd.read_sql_query("SELECT * FROM cash_movements ORDER BY ts DESC", conn)
-        conn.close()
-        st.dataframe(df, use_container_width=True)
-
-
-def page_reports():
-    st.header("📊 Rapports (X/Z)")
-
-    day = st.date_input("Jour", value=date.today())
-    d0 = datetime.combine(day, datetime.min.time()).isoformat()
-    d1 = datetime.combine(day, datetime.max.time()).isoformat()
-
-    conn = get_conn()
-    df = pd.read_sql_query(
-        "SELECT * FROM sales WHERE ts BETWEEN ? AND ? ORDER BY ts DESC",
-        conn,
-        params=(d0, d1),
-    )
-    conn.close()
-
-    st.subheader("Ventes du jour")
-    if df.empty:
-        st.info("Aucune vente pour ce jour.")
-    else:
-        st.dataframe(df[["id", "ts", "subtotal", "tva_total", "total", "paid_cash", "paid_card", "payment_method"]], use_container_width=True)
-        st.download_button("⬇️ Export CSV", data=df.to_csv(index=False).encode("utf-8"), file_name=f"ventes_{day}.csv", mime="text/csv")
-
-        total_ttc = df["total"].sum()
-        total_cash = df["paid_cash"].sum()
-        total_card = df["paid_card"].sum()
-        nbr_tickets = len(df)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Chiffre d'affaires", f"{total_ttc:.3f} TND")
-        c2.metric("Cash encaissé", f"{total_cash:.3f} TND")
-        c3.metric("Carte encaissée", f"{total_card:.3f} TND")
-        c4.metric("Tickets", str(nbr_tickets))
-
-    st.subheader("Caisse (mouvements)")
-    conn = get_conn()
-    dfm = pd.read_sql_query(
-        "SELECT * FROM cash_movements WHERE ts BETWEEN ? AND ? ORDER BY ts DESC",
-        conn,
-        params=(d0, d1),
-    )
-    conn.close()
-    if dfm.empty:
-        st.info("Aucun mouvement.")
-    else:
-        st.dataframe(dfm, use_container_width=True)
-        solde = (dfm[dfm["type"] == "IN"]["amount"].sum() - dfm[dfm["type"] == "OUT"]["amount"].sum())
-        st.metric("Solde net mouvements", f"{solde:.3f} TND")
-
-
-# ---------------------- MAIN APP ----------------------
-
-def config_sidebar():
-    st.sidebar.subheader("Paramètres boutique")
-    st.session_state.store_name = st.sidebar.text_input("Nom boutique", value=st.session_state.get("store_name", "Ma Superette"))
-    st.session_state.store_addr = st.sidebar.text_input("Adresse/Contact", value=st.session_state.get("store_addr", "Rue xx, Tél: xx"))
-
-    st.sidebar.divider()
-    st.sidebar.subheader("🖨️ Impression thermique (ESC/POS)")
-    if not ESC_POS_AVAILABLE:
-        st.sidebar.warning("python-escpos غير مثبّت. نفّذ: pip install python-escpos")
-    # Preset: Epson USB
-    preset = st.sidebar.selectbox("Preset", ["Epson TM-T20/TM-T88 (USB)", "Aucun"], index=0)
-    st.session_state.print_enabled = st.sidebar.checkbox("تفعيل الطباعة الحرارية", value=st.session_state.get("print_enabled", False))
-    st.session_state.printer_mode = st.sidebar.selectbox(
-        "وضع الاتصال",
-        ["USB", "Network", "Serial", "None"],
-        index=["USB","Network","Serial","None"].index(st.session_state.get("printer_mode", "USB"))
-    )
-
-    mode = st.session_state.printer_mode
-    if mode == "USB":
-        if preset == "Epson TM-T20/TM-T88 (USB)":
-            st.session_state["usb_vid"] = st.session_state.get("usb_vid", "0x04b8")
-            st.session_state["usb_pid"] = st.session_state.get("usb_pid", "0x0e15")
-        st.session_state.usb_vid = st.sidebar.text_input("USB Vendor ID", value=st.session_state.get("usb_vid", "0x04b8"))
-        st.session_state.usb_pid = st.sidebar.text_input("USB Product ID", value=st.session_state.get("usb_pid", "0x0e15"))
-        st.session_state.usb_in_ep = st.sidebar.text_input("IN endpoint (optionnel)", value=st.session_state.get("usb_in_ep", ""))
-        st.session_state.usb_out_ep = st.sidebar.text_input("OUT endpoint (optionnel)", value=st.session_state.get("usb_out_ep", ""))
-    elif mode == "Network":
-        st.session_state.net_host = st.sidebar.text_input("IP de l'imprimante", value=st.session_state.get("net_host", "192.168.0.123"))
-        st.session_state.net_port = st.sidebar.number_input("Port", value=int(st.session_state.get("net_port", 9100)), step=1)
-    elif mode == "Serial":
-        st.session_state.ser_dev = st.sidebar.text_input("Périphérique (ex: /dev/ttyUSB0)", value=st.session_state.get("ser_dev", "/dev/ttyUSB0"))
-        st.session_state.ser_baud = st.sidebar.number_input("Baudrate", value=int(st.session_state.get("ser_baud", 9600)), step=100)
-
-    colA, colB = st.sidebar.columns(2)
-    with colA:
-        if st.button("🧪 Test print", use_container_width=True):
-            try:
-                print_ticket_thermal(
-                    [{"name": "Test Item", "qty": 1, "price": 1.000}],
-                    1.000, 0.000, 1.000, 1.000, 0.000, 0.000,
-                    st.session_state.get("store_name",""), st.session_state.get("store_addr","")
-                )
-            except Exception as e:
-                st.error(f"فشل الاختبار: {e}")
-    with colB:
-        st.sidebar.caption("Astuce: gardez le focus sur la zone de scan toute la journée.")
-
-
-def main():
-    init_db()
-    init_state()
-
-    st.title("🛒 Superette — Gestion Caisse (Code-barres)")
-    tabs = st.tabs(["Caisse", "Produits", "Caisse (IN/OUT)", "Rapports"])
-
-    with st.sidebar:
-        config_sidebar()
-
-    with tabs[0]:
-        page_caisse()
-    with tabs[1]:
-        page_products()
-    with tabs[2]:
-        page_cash_movements()
-    with tabs[3]:
-        page_reports()
-
-
-# --- Safe runner: surface exceptions instead of a white page ---
-if __name__ == "__main__":
+def whatsapp_number(branch: str) -> str:
     try:
-        main()
-    except Exception as e:
-        st.error("⚠️ صار خطأ خلا الصفحة تبيّض. شوف التفاصيل:")
-        st.exception(e)
+        m = st.secrets["branch_whatsapp"]
+        if "Menzel" in branch or branch=="MB": return str(m.get("MB",""))
+        if "Bizerte" in branch or branch=="BZ": return str(m.get("BZ",""))
+    except Exception:
+        pass
+    return ""
+
+def wa_link(number: str, message: str) -> str:
+    num = "".join(c for c in str(number) if c.isdigit())
+    return f"https://wa.me/{num}?text={urllib.parse.quote(message)}" if num else ""
+
+def norm_phone(s: str) -> str:
+    """حوّل الهاتف إلى 216XXXXXXXX إن كان 8 أرقام محلية، وخلّي أي رقم ثاني كما هو بعد تنظيفه من غير الأرقام."""
+    d = "".join(c for c in str(s) if c.isdigit())
+    if d.startswith("216"):
+        return d
+    if len(d) == 8:
+        return "216" + d
+    return d
+
+# ---------------- اختيار الفرع + قفل الموظفين ----------------
+st.sidebar.subheader("⚙️ إعدادات")
+CUR_BRANCH = st.sidebar.selectbox("اختر الفرع", BRANCHES, index=0)
+
+need_pw = branch_password(CUR_BRANCH)
+key_pw  = f"branch_pw_ok::{CUR_BRANCH}"
+if need_pw:
+    if key_pw not in st.session_state:
+        st.session_state[key_pw] = False
+    if not st.session_state[key_pw]:
+        pw_try = st.sidebar.text_input("🔐 كلمة سرّ الفرع (للموظفين)", type="password")
+        if st.sidebar.button("فتح"):
+            if pw_try == need_pw:
+                st.session_state[key_pw] = True
+                st.sidebar.success("✅ تم الفتح")
+            else:
+                st.sidebar.error("❌ كلمة سر غير صحيحة")
         st.stop()
+
+# ---------------- تحميل قاعدة البيانات ----------------
+ensure_store()
+db = load_db()
+for k in ("trainees","subjects","plans","sessions"):
+    db.setdefault(k, [])
+
+# ---------------- تبويبات ----------------
+tab_tr, tab_sub, tab_plan, tab_abs, tab_rep = st.tabs([
+    "👥 المتكوّنون",
+    "📚 المواد",
+    "⏱️ الخطط",
+    "🚫 الغيابات",
+    "📊 التقارير & 💬 واتساب",
+])
+
+# =========================================================
+# 👥 المتكوّنون
+# =========================================================
+with tab_tr:
+    st.subheader(f"المتكوّنون — {CUR_BRANCH}")
+    with st.form("add_trainee"):
+        c1, c2, c3, c4 = st.columns(4)
+        name      = c1.text_input("الاسم واللقب")
+        phone     = c2.text_input("الهاتف (المتكوّن)")
+        guardian  = c3.text_input("هاتف الولي (اختياري)")
+        specialty = c4.text_input("الاختصاص")
+        _         = st.text_input("الفرع", value=CUR_BRANCH, disabled=True)
+        sub = st.form_submit_button("➕ إضافة")
+    if sub:
+        if not name.strip() or not phone.strip():
+            st.error("يرجى إدخال الاسم وهاتف المتكوّن.")
+        else:
+            db["trainees"].append({
+                "id": uuid.uuid4().hex[:10],
+                "name": name.strip(),
+                "phone": norm_phone(phone),
+                "guardian_phone": norm_phone(guardian) if guardian else "",
+                "branch": CUR_BRANCH,
+                "specialty": specialty.strip()
+            })
+            save_db(db)
+            st.success("✅ تمت الإضافة.")
+
+    # قائمة
+    tr_list = [t for t in db["trainees"] if t.get("branch")==CUR_BRANCH]
+    if not tr_list:
+        st.info("لا يوجد متكوّنون بعد.")
+    else:
+        tdf = pd.DataFrame(tr_list)
+        tdf["هاتف المتكوّن"] = tdf["phone"].apply(lambda x: f"+{x}" if str(x).isdigit() else x)
+        tdf["هاتف الولي"]   = tdf["guardian_phone"].apply(lambda x: f"+{x}" if str(x).isdigit() and x else "")
+        tdf["الاسم"]        = tdf["name"]
+        tdf["الاختصاص"]     = tdf.get("specialty", "")
+        st.dataframe(tdf[["الاسم","الاختصاص","هاتف المتكوّن","هاتف الولي"]], use_container_width=True, height=360)
+
+        # 🔴 حذف متكوّن كامل (مع خططه وجلساته)
+        del_key = st.selectbox("اختر متكوّن للحذف (اختياري)", ["—"] + [f"{t['name']} (+{t['phone']})" for t in tr_list])
+        if del_key != "—" and st.button("🗑️ حذف المتكوّن"):
+            pid = next((t["id"] for t in tr_list if f"{t['name']} (+{t['phone']})"==del_key), None)
+            if pid:
+                db["trainees"]  = [x for x in db["trainees"] if x["id"] != pid]
+                db["plans"]     = [x for x in db["plans"] if x["trainee_id"] != pid]
+                db["sessions"]  = [x for x in db["sessions"] if x["trainee_id"] != pid]
+                save_db(db)
+                st.success("تم الحذف.")
+
+# =========================================================
+# 📚 المواد
+# =========================================================
+with tab_sub:
+    st.subheader(f"المواد — {CUR_BRANCH}")
+    with st.form("add_subject"):
+        c1, c2 = st.columns(2)
+        sub_name = c1.text_input("اسم المادة")
+        _        = c2.text_input("الفرع", value=CUR_BRANCH, disabled=True)
+        subm = st.form_submit_button("➕ إضافة")
+    if subm:
+        if not sub_name.strip():
+            st.error("أدخل اسم المادة.")
+        else:
+            db["subjects"].append({
+                "id": uuid.uuid4().hex[:10],
+                "name": sub_name.strip(),
+                "branch": CUR_BRANCH
+            })
+            save_db(db)
+            st.success("✅ تمت الإضافة.")
+
+    subs = [s for s in db["subjects"] if s.get("branch")==CUR_BRANCH]
+    if not subs:
+        st.info("لا توجد مواد بعد.")
+    else:
+        sdf = pd.DataFrame(subs)
+        sdf["المادة"] = sdf["name"]
+        st.dataframe(sdf[["المادة"]], use_container_width=True, height=320)
+
+        del_s_key = st.selectbox("اختر مادة للحذف (اختياري)", ["—"]+[s["name"] for s in subs])
+        if del_s_key != "—" and st.button("🗑️ حذف المادة"):
+            sid = next((s["id"] for s in subs if s["name"]==del_s_key), None)
+            if sid:
+                db["subjects"] = [x for x in db["subjects"] if x["id"] != sid]
+                db["plans"]    = [x for x in db["plans"] if x["subject_id"] != sid]
+                db["sessions"] = [x for x in db["sessions"] if x["subject_id"] != sid]
+                save_db(db)
+                st.success("تم الحذف.")
+
+# =========================================================
+# ⏱️ الخطط (إجمالي/أسبوعي لكل متكوّن/مادة)
+# =========================================================
+with tab_plan:
+    st.subheader(f"الخطط — {CUR_BRANCH}")
+    tr_list = [t for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH]
+    sub_list = [s for s in db.get("subjects", []) if s.get("branch")==CUR_BRANCH]
+
+    if not tr_list or not sub_list:
+        st.info("أضِف على الأقل متكوّنًا ومادة في الفرع الحالي.")
+    else:
+        # فلتر اختياري بالاختصاص
+        specialties = sorted({(t.get("specialty") or "").strip() for t in tr_list if (t.get("specialty") or "").strip()})
+        spec_pick = st.selectbox("فلترة حسب الاختصاص (اختياري)", ["الكل"] + specialties) if specialties else "الكل"
+        tr_list_view = tr_list if spec_pick=="الكل" else [t for t in tr_list if (t.get("specialty") or "").strip()==spec_pick]
+
+        if not tr_list_view:
+            st.warning("لا توجد أسماء ضمن هذا الاختصاص.")
+        else:
+            tr_opts = {f"{t['name']} — +{t['phone']} — [{t.get('specialty','') or '-'}]": t for t in tr_list_view}
+            tr_key  = st.selectbox("اختر المتكوّن", list(tr_opts.keys()))
+            tr      = tr_opts[tr_key]
+
+            sub_opts = {s["name"]: s for s in sub_list}
+            sub_key  = st.selectbox("اختر المادة", list(sub_opts.keys()))
+            subj     = sub_opts[sub_key]
+
+            plans_list = db.get("plans", [])
+            plan_exist = next(
+                (p for p in plans_list
+                 if p.get("trainee_id")==tr.get("id")
+                 and p.get("subject_id")==subj.get("id")
+                 and p.get("branch")==CUR_BRANCH),
+                None
+            )
+
+            total_hours  = st.number_input(
+                "إجمالي ساعات المادة للمتكوّن",
+                min_value=0.0, step=1.0,
+                value=float(plan_exist.get("total_hours", 0.0)) if plan_exist else 0.0
+            )
+            weekly_hours = st.number_input(
+                "ساعات الأسبوع (افتراضي للحصص)",
+                min_value=0.0, step=0.5,
+                value=float(plan_exist.get("weekly_hours", 2.0)) if plan_exist else 2.0
+            )
+
+            c1, c2 = st.columns(2)
+            if c1.button("💾 حفظ/تحديث الخطة"):
+                if total_hours <= 0:
+                    st.error("❌ إجمالي الساعات لازم > 0.")
+                else:
+                    if plan_exist:
+                        plan_exist["total_hours"]  = float(total_hours)
+                        plan_exist["weekly_hours"] = float(weekly_hours)
+                    else:
+                        db.setdefault("plans", []).append({
+                            "id": uuid.uuid4().hex[:10],
+                            "trainee_id": tr.get("id"),
+                            "subject_id": subj.get("id"),
+                            "total_hours": float(total_hours),
+                            "weekly_hours": float(weekly_hours),
+                            "branch": CUR_BRANCH
+                        })
+                    save_db(db)
+                    st.success("✅ تم الحفظ.")
+
+            if plan_exist and c2.button("🗑️ حذف الخطة"):
+                db["plans"] = [p for p in db.get("plans", []) if p.get("id") != plan_exist.get("id")]
+                save_db(db)
+                st.success("تم الحذف.")
+
+            # عرض جميع الخطط
+            plans = [p for p in db.get("plans", []) if p.get("branch")==CUR_BRANCH]
+            if plans:
+                sp_map = {s["id"]: s["name"] for s in sub_list}
+                tr_map = {t["id"]: f"{t['name']} (+{t['phone']})" for t in tr_list}
+                t_spec = {t["id"]: (t.get("specialty") or "") for t in tr_list}
+                pdf = pd.DataFrame(plans)
+                pdf["المتكوّن"] = pdf["trainee_id"].map(tr_map)
+                pdf["الاختصاص"] = pdf["trainee_id"].map(t_spec)
+                pdf["المادة"]   = pdf["subject_id"].map(sp_map)
+                pdf["إجمالي"]   = pdf["total_hours"]
+                pdf["أسبوعي"]   = pdf["weekly_hours"]
+                st.markdown("#### الخطط الحالية")
+                st.dataframe(pdf[["المتكوّن","الاختصاص","المادة","إجمالي","أسبوعي"]], use_container_width=True)
+
+# =========================================================
+# 🚫 الغيابات
+# =========================================================
+with tab_abs:
+    st.subheader(f"تسجيل الغيابات — {CUR_BRANCH}")
+    tr_branch = [t for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH]
+    sub_list  = [s for s in db.get("subjects", []) if s.get("branch")==CUR_BRANCH]
+
+    if not tr_branch or not sub_list:
+        st.info("لازم على الأقل متكوّن ومادة.")
+    else:
+        # ⬅️ فلترة إلزامية بالاختصاص قبل اختيار المتكوّن
+        specialties = sorted({(t.get("specialty") or "").strip() for t in tr_branch if (t.get("specialty") or "").strip()})
+        if not specialties:
+            st.info("📌 لم تُسجَّل اختصاصات بعد. يمكنك إضافتها عند إضافة المتكوّن.")
+            spec_pick = "الكل"
+            tr_list_view = tr_branch
+        else:
+            spec_pick = st.selectbox("اختيار الاختصاص", specialties)
+            tr_list_view = [t for t in tr_branch if (t.get("specialty") or "").strip()==spec_pick]
+
+        if not tr_list_view:
+            st.warning("لا توجد أسماء ضمن هذا الاختصاص في هذا الفرع.")
+        else:
+            tr_opts = {f"{t['name']} — +{t['phone']} — [{t.get('specialty','') or '-'}]": t for t in tr_list_view}
+            tr_key  = st.selectbox("المتكوّن", list(tr_opts.keys()))
+            tr      = tr_opts[tr_key]
+
+            sub_opts = {s["name"]: s for s in sub_list}
+            sub_key  = st.selectbox("المادة", list(sub_opts.keys()))
+            subj     = sub_opts[sub_key]
+
+            ses_date  = st.date_input("تاريخ الجلسة", value=date.today())
+            abs_hours = st.number_input("ساعات الغياب", min_value=0.0, step=0.5, value=2.0)
+            reason    = st.text_input("السبب (اختياري)")
+            has_med   = st.checkbox("شهادة طبية؟ (يُستثنى من نسبة الغياب)")
+
+            # اختيار الإرسال عند التسجيل
+            send_wa = st.checkbox("💬 إرسال تنبيه واتساب بعد التسجيل")
+            wa_target = st.radio("المرسل إليه", ["المتكوّن","الولي"], horizontal=True, disabled=not send_wa)
+            if st.button("➕ تسجيل الغياب"):
+                if abs_hours <= 0:
+                    st.error("الساعات لازم > 0.")
+                else:
+                    sess_id = uuid.uuid4().hex[:10]
+                    db["sessions"].append({
+                        "id": sess_id,
+                        "trainee_id": tr["id"],
+                        "subject_id": subj["id"],
+                        "date": ses_date.isoformat(),
+                        "hours_absent": float(abs_hours),
+                        "reason": reason.strip(),
+                        "has_medical": bool(has_med),
+                        "branch": CUR_BRANCH
+                    })
+                    save_db(db)
+                    st.success("✅ تم التسجيل.")
+
+                    if send_wa:
+                        phone_to = tr["phone"] if wa_target=="المتكوّن" else (tr.get("guardian_phone") or "")
+                        if not phone_to:
+                            st.warning("لا يوجد رقم صالح للمرسل إليه المختار.")
+                        else:
+                            nm   = tr["name"]
+                            msg  = (
+                                f"Bonjour {nm},\n"
+                                f"Absence enregistrée — Matière: {subj['name']} — Date: {ses_date.strftime('%Y-%m-%d')}\n"
+                                f"Heures d'absence: {abs_hours} h.\n"
+                                f"{'Certificat médical fourni.' if has_med else 'Merci d\'apporter un justificatif si nécessaire.'}"
+                            )
+                            st.markdown(f"[📲 فتح واتساب]({wa_link(phone_to, msg)})")
+
+    # عرض سجلات الغياب في الفرع مع فلترة
+    sessions = [s for s in db.get("sessions", []) if s.get("branch")==CUR_BRANCH]
+    if sessions:
+        sp_map = {s["id"]: s["name"] for s in db.get("subjects", []) if s.get("branch")==CUR_BRANCH}
+        tr_map = {t["id"]: f"{t['name']} (+{t['phone']})" for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH}
+        tr_spec= {t["id"]: (t.get("specialty") or "") for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH}
+        tr_guard= {t["id"]: (t.get("guardian_phone") or "") for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH}
+
+        sdf = pd.DataFrame(sessions)
+        sdf["المتكوّن"]    = sdf["trainee_id"].map(tr_map)
+        sdf["الاختصاص"]    = sdf["trainee_id"].map(tr_spec)
+        sdf["المادة"]      = sdf["subject_id"].map(sp_map)
+        sdf["التاريخ"]     = pd.to_datetime(sdf["date"]).dt.strftime("%Y-%m-%d")
+        sdf["ساعات الغياب"] = sdf["hours_absent"]
+        sdf["شهادة طبية"]   = sdf["has_medical"].map({True:"نعم", False:"لا"})
+        sdf["السبب"]        = sdf["reason"]
+        st.markdown("#### سجلات الغياب (الفرع)")
+        st.dataframe(sdf[["التاريخ","المتكوّن","الاختصاص","المادة","ساعات الغياب","شهادة طبية","السبب"]],
+                     use_container_width=True, height=360)
+
+        # ===== إدارة الغيابات (حذف / اعتبار بشهادة طبية / إلغاء الشهادة) =====
+        st.markdown("---")
+        st.markdown("### 🛠️ إدارة الغيابات")
+
+        tr_branch_list = [t for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH]
+        tr_admin_opts = {f"{t['name']} — +{t['phone']} — [{t.get('specialty','') or '-'}]": t for t in tr_branch_list}
+        if tr_admin_opts:
+            pick_tr_admin = st.selectbox("اختر المتكوّن لإدارة غياباته", list(tr_admin_opts.keys()))
+            tr_admin = tr_admin_opts[pick_tr_admin]
+            # جلسات المتكوّن المختار
+            tr_sess = [s for s in sessions if s["trainee_id"]==tr_admin["id"]]
+            if not tr_sess:
+                st.info("لا توجد غيابات لهذا المتكوّن.")
+            else:
+                s_df = pd.DataFrame(tr_sess)
+                s_df["عرض"] = s_df.apply(lambda r: f"{pd.to_datetime(r['date']).date()} — {sp_map.get(r['subject_id'],'-')} — {r['hours_absent']}h — {'طبي' if r.get('has_medical') else 'بدون طبي'}", axis=1)
+                # Multi-select حسب ID
+                select_ids = st.multiselect("اختر غيابات للتصرف فيها", options=list(s_df["id"]), format_func=lambda x: s_df.loc[s_df["id"]==x, "عرض"].iloc[0])
+
+                c1, c2, c3 = st.columns(3)
+                if c1.button("🗑️ حذف الغيابات المحدّدة", disabled=(len(select_ids)==0)):
+                    before = len(db["sessions"])
+                    db["sessions"] = [s for s in db["sessions"] if s["id"] not in select_ids]
+                    save_db(db)
+                    st.success(f"تم الحذف: {before - len(db['sessions'])} سجل.")
+
+                # اعتبار كطبّي (يعني الغياب ذاك ماعادش يدخل في النسبة)
+                if c2.button("✅ اعتبار المحدّدة بشهادة طبية", disabled=(len(select_ids)==0)):
+                    cnt = 0
+                    for s in db["sessions"]:
+                        if s["id"] in select_ids and not s.get("has_medical"):
+                            s["has_medical"] = True
+                            cnt += 1
+                    save_db(db)
+                    st.success(f"تم وضع شهادة طبية لعدد {cnt}.")
+
+                if c3.button("↩️ إلغاء الشهادة الطبية للمحدّدة", disabled=(len(select_ids)==0)):
+                    cnt = 0
+                    for s in db["sessions"]:
+                        if s["id"] in select_ids and s.get("has_medical"):
+                            s["has_medical"] = False
+                            cnt += 1
+                    save_db(db)
+                    st.success(f"تم إلغاء الشهادة الطبية لعدد {cnt}.")
+
+# =========================================================
+# 📊 التقارير & 💬 واتساب
+# =========================================================
+with tab_rep:
+    st.subheader(f"التقارير — {CUR_BRANCH}")
+
+    tr_by_id = {t["id"]: t for t in db.get("trainees", []) if t.get("branch")==CUR_BRANCH}
+    sub_by_id= {s["id"]: s for s in db.get("subjects", []) if s.get("branch")==CUR_BRANCH}
+    plans    = [p for p in db.get("plans", []) if p.get("branch")==CUR_BRANCH]
+    sess     = [s for s in db.get("sessions", []) if s.get("branch")==CUR_BRANCH]
+
+    rows = []
+    for p in plans:
+        tid = p["trainee_id"]; sid = p["subject_id"]
+        trainee = tr_by_id.get(tid); subj = sub_by_id.get(sid)
+        if not trainee or not subj:
+            continue
+
+        total_hours  = float(p.get("total_hours", 0.0))
+        weekly_hours = float(p.get("weekly_hours", 0.0))
+
+        s_list = [s for s in sess if s["trainee_id"]==tid and s["subject_id"]==sid]
+        absent_effective = sum(float(s["hours_absent"]) for s in s_list if not s.get("has_medical"))
+        absent_medical   = sum(float(s["hours_absent"]) for s in s_list if s.get("has_medical"))
+
+        pct = (absent_effective/total_hours)*100 if total_hours>0 else 0.0
+        limit_hours = ABSENCE_THRESHOLD_PCT * total_hours
+        remaining_to_limit = max(limit_hours - absent_effective, 0.0)
+
+        rows.append({
+            "trainee_id": tid,
+            "subject_id": sid,
+            "المتكوّن": f"{trainee['name']} (+{trainee['phone']})",
+            "الاختصاص": trainee.get("specialty",""),
+            "المادة": subj["name"],
+            "إجمالي الساعات": total_hours,
+            "ساعات أسبوعية": weekly_hours,
+            "غياب فعلي (بدون طبّي)": round(absent_effective,2),
+            "غياب بشهادة": round(absent_medical,2),
+            "نسبة الغياب %": round(pct,2),
+            "الحد (10%) ساعة": round(limit_hours,2),
+            "متبقّي للحد": round(remaining_to_limit,2),
+            "هاتف_المتكوّن": trainee["phone"],
+            "هاتف_الولي": trainee.get("guardian_phone","")
+        })
+
+    if not rows:
+        st.info("لا توجد خطط بعد لإظهار التقرير.")
+    else:
+        rdf = pd.DataFrame(rows)
+        # فلاتر
+        c1, c2, c3 = st.columns(3)
+        f_tr = c1.text_input("بحث بالمتكوّن/الهاتف")
+        f_sb = c2.text_input("بحث بالمادة")
+        spec_list = sorted({(r or "").strip() for r in rdf["الاختصاص"].fillna("") if (r or "").strip()})
+        f_sp = c3.selectbox("فلترة بالاختصاص", ["الكل"] + spec_list) if spec_list else c3.selectbox("فلترة بالاختصاص", ["الكل"])
+
+        view = rdf.copy()
+        if f_tr.strip():
+            q = f_tr.lower()
+            view = view[view["المتكوّن"].str.lower().str.contains(q)]
+        if f_sb.strip():
+            q = f_sb.lower()
+            view = view[view["المادة"].str.lower().str.contains(q)]
+        if f_sp != "الكل":
+            view = view[view["الاختصاص"]==f_sp]
+
+        st.dataframe(
+            view[["المتكوّن","الاختصاص","المادة","إجمالي الساعات","ساعات أسبوعية","غياب فعلي (بدون طبّي)","غياب بشهادة","نسبة الغياب %","الحد (10%) ساعة","متبقّي للحد"]],
+            use_container_width=True, height=420
+        )
+
+        st.markdown("#### 💬 رسائل واتساب")
+        if not view.empty:
+            pick = st.selectbox("اختر سجل لإرسال رسالة", [f"{r['المتكوّن']} — {r['المادة']}" for _, r in view.iterrows()])
+            target = st.radio("المرسل إليه", ["المتكوّن","الولي"], horizontal=True)
+            if pick:
+                row_idx = [i for i, s in enumerate([f"{r['المتكوّن']} — {r['المادة']}" for _, r in view.iterrows()]) if s==pick][0]
+                row = view.iloc[row_idx]
+                nm   = row["المتكوّن"].split("(+")[0].strip()
+                phone_to = row["هاتف_المتكوّن"] if target=="المتكوّن" else (row["هاتف_الولي"] or "")
+                if not phone_to:
+                    st.warning("لا يوجد رقم صالح للمرسل إليه المختار.")
+                else:
+                    msg = (
+                        f"Bonjour {nm},\n\n"
+                        f"Rappel d'assiduité — Spécialité: {row['الاختصاص'] or '-'} — Matière: {row['المادة']}.\n"
+                        f"Heures d'absence (hors certificats): {row['غياب فعلي (بدون طبّي)']} h\n"
+                        f"Seuil de 10%: {row['الحد (10%) ساعة']} h\n"
+                        f"Reste avant d'atteindre le seuil: {row['متبقّي للحد']} h\n\n"
+                        f"Merci de respecter le planning. 😊"
+                    )
+                    st.markdown(f"[📲 فتح واتساب]({wa_link(phone_to, msg)})")
+
+        # روابط جماعية (اختياري)
+        with st.expander("روابط جماعية سريعة (إلى المتكوّنين)"):
+            if not view.empty:
+                for _, r in view.head(200).iterrows():
+                    nm = r["المتكوّن"].split("(+")[0].strip()
+                    msg = (
+                        f"Bonjour {nm},\n"
+                        f"Spécialité: {r['الاختصاص'] or '-'} — Matière: {r['المادة']}\n"
+                        f"Absences (hors certificats): {r['غياب فعلي (بدون طبّي)']} h\n"
+                        f"Seuil 10%: {r['الحد (10%) ساعة']} h — Reste: {r['متبقّي للحد']} h\n"
+                        f"Merci."
+                    )
+                    link = wa_link(r["هاتف_المتكوّن"], msg)
+                    st.markdown(f"- {r['المتكوّن']}: " + (f"[فتح واتساب]({link})" if link else "—"))
+
+st.caption("📦 يتم حفظ البيانات محليًا في attendance_db.json داخل مجلد التطبيق.")
