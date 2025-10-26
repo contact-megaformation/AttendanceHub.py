@@ -194,14 +194,18 @@ def init_state():
 
 def parse_quantity_barcode(s: str) -> Tuple[float, str]:
     s = s.strip()
+    # Allow pattern like 3*<code> to set quantity. Keep digits only from code.
     if "*" in s:
         q_str, bc = s.split("*", 1)
         try:
             q = float(q_str.replace(",", "."))
-            return (q if q > 0 else 1.0, bc.strip())
         except Exception:
-            return (1.0, s)
-    return (1.0, s)
+            q = 1.0
+        digits = "".join(ch for ch in str(bc) if ch.isdigit())
+        return (q if q > 0 else 1.0, digits)
+    # No quantity prefix: use 1 and digits only from entire string
+    digits = "".join(ch for ch in str(s) if ch.isdigit())
+    return (1.0, digits or s)
 
 
 def add_scan_to_cart():
@@ -295,6 +299,8 @@ def render_receipt_html(sale_id: int, items: List[Dict], subtotal: float, tva_to
 
 
 # ---------------------- PAGES ----------------------
+
+
 
 def page_caisse():
     st.header("🧾 Caisse — Vente")
@@ -593,13 +599,19 @@ def config_sidebar():
     st.sidebar.subheader("🖨️ Impression thermique (ESC/POS)")
     if not ESC_POS_AVAILABLE:
         st.sidebar.warning("python-escpos غير مثبّت. نفّذ: pip install python-escpos")
+    # Preset
+    preset = st.sidebar.selectbox("Preset", ["Epson TM-T20/TM-T88 (USB)", "Aucun"], index=0)
     st.session_state.print_enabled = st.sidebar.checkbox("تفعيل الطباعة الحرارية", value=st.session_state.get("print_enabled", False))
-    st.session_state.printer_mode = st.sidebar.selectbox("وضع الاتصال", ["None", "USB", "Network", "Serial"], index=["None","USB","Network","Serial"].index(st.session_state.get("printer_mode", "None")))
+    st.session_state.printer_mode = st.sidebar.selectbox("وضع الاتصال", ["USB", "Network", "Serial", "None"], index=["USB","Network","Serial","None"].index(st.session_state.get("printer_mode", "USB")))
 
     mode = st.session_state.printer_mode
     if mode == "USB":
-        st.session_state.usb_vid = st.sidebar.text_input("USB Vendor ID (ex: 0x04b8)", value=st.session_state.get("usb_vid", "0x04b8"))
-        st.session_state.usb_pid = st.sidebar.text_input("USB Product ID (ex: 0x0e15)", value=st.session_state.get("usb_pid", "0x0e15"))
+        # Apply preset defaults for Epson
+        if preset == "Epson TM-T20/TM-T88 (USB)":
+            st.session_state["usb_vid"] = "0x04b8"
+            st.session_state["usb_pid"] = "0x0e15"
+        st.session_state.usb_vid = st.sidebar.text_input("USB Vendor ID", value=st.session_state.get("usb_vid", "0x04b8"))
+        st.session_state.usb_pid = st.sidebar.text_input("USB Product ID", value=st.session_state.get("usb_pid", "0x0e15"))
         st.session_state.usb_in_ep = st.sidebar.text_input("IN endpoint (optionnel)", value=st.session_state.get("usb_in_ep", ""))
         st.session_state.usb_out_ep = st.sidebar.text_input("OUT endpoint (optionnel)", value=st.session_state.get("usb_out_ep", ""))
     elif mode == "Network":
@@ -619,11 +631,11 @@ def config_sidebar():
             except Exception as e:
                 st.error(f"فشل الاختبار: {e}")
     with colB:
-        st.sidebar.caption("Astuce: gardez le focus sur la zone de scan toute la journée.")
+        st.sidebar.caption("Astuce: gardez le focus sur la zone de scan toute la journée.")("Astuce: gardez le focus sur la zone de scan toute la journée.")
 
 
 def main():
-    st.set_page_config(page_title="Caisse Superette (Barcode)", layout="wide")
+    # (set_page_config تمّ النداء عليه في الأعلى) 
     init_db()
     init_state()
 
