@@ -112,7 +112,7 @@ with tab_cfg:
                     db["specialties"].append(spec)
                     save_db(db)
                     st.success("تمّت الإضافة ✅")
-                    st.experimental_rerun()
+                    st.rerun()
 
             if db["specialties"]:
                 del_spec = st.selectbox("🗑️ حذف اختصاص", db["specialties"], key="cfg_del_spec_sel")
@@ -126,7 +126,7 @@ with tab_cfg:
                         db["specialties"] = [s for s in db["specialties"] if s != del_spec]
                         save_db(db)
                         st.success("تمّ الحذف ✅")
-                        st.experimental_rerun()
+                        st.rerun()
 
     st.markdown("---")
 
@@ -157,14 +157,13 @@ with tab_cfg:
             wh         = st.number_input("ساعات أسبوعية", min_value=0.0, step=1.0, key="cfg_sub_wh")
             th         = st.number_input("إجمالي ساعات المادة", min_value=0.0, step=1.0, key="cfg_sub_th")
 
-            # إضافة
+            # إضافة/تحديث
             if st.button("حفظ مادة", key="cfg_sub_save"):
                 if not sub_name.strip():
                     st.error("اسم المادة مطلوب.")
                 elif spec_sel == "—" or not spec_sel:
                     st.error("اختر اختصاص.")
                 else:
-                    # شوف إذا موجودة (نفس الاسم/الفرع/الاختصاص) => نحدّث
                     exist = next((s for s in db["subjects"]
                                   if s["name"].strip().lower()==sub_name.strip().lower()
                                   and s["branch"]==branch_sel and s["specialty"]==spec_sel), None)
@@ -182,7 +181,7 @@ with tab_cfg:
                             "total_hours": float(th)
                         })
                         save_db(db); st.success("تمّت الإضافة ✅")
-                    st.experimental_rerun()
+                    st.rerun()
 
             # حذف
             existing_subs = [f"{s['name']} — {s['branch']} — {s['specialty']}" for s in db["subjects"]]
@@ -191,14 +190,13 @@ with tab_cfg:
                 if st.button("حذف المادة", key="cfg_sub_del_btn"):
                     idx = existing_subs.index(del_pick)
                     sub_id = db["subjects"][idx]["id"]
-                    # منع الحذف لو مستعملة في غيابات
                     if any(a["subject_id"] == sub_id for a in db["absences"]):
                         st.error("لا يمكن الحذف: المادة مستعملة في سجلات غياب.")
                     else:
                         db["subjects"].pop(idx)
                         save_db(db)
                         st.success("تمّ الحذف ✅")
-                        st.experimental_rerun()
+                        st.rerun()
 
 # ========================== (2) المتكوّنون ==========================
 with tab_tr:
@@ -246,7 +244,7 @@ with tab_tr:
                 })
                 save_db(db)
                 st.success("تمّت الإضافة ✅")
-                st.experimental_rerun()
+                st.rerun()
 
         st.markdown("---")
 
@@ -267,7 +265,7 @@ with tab_tr:
             egphone= st.text_input("هاتف الولي", value=cur["guardian_phone"], key=f"tr_edit_gphone_{idx}")
 
             c1, c2 = st.columns(2)
-            if c1.button("💾 حفظ التعديل", key=f"tr_edit_save_{idx}"):
+            if c1.button("💾 حفظ التعديلات", key=f"tr_edit_save_{idx}"):
                 if not ename.strip():
                     st.error("الاسم مطلوب.")
                 elif not espec or espec == "—":
@@ -280,16 +278,15 @@ with tab_tr:
                     cur["guardian_phone"] = normalize_phone(egphone)
                     save_db(db)
                     st.success("تمّ الحفظ ✅")
-                    st.experimental_rerun()
+                    st.rerun()
 
             if c2.button("🗑️ حذف المتكوّن", key=f"tr_edit_del_{idx}"):
-                # حذف غياباته أيضًا
                 tid = cur["id"]
                 db["absences"] = [a for a in db["absences"] if a["trainee_id"] != tid]
                 db["trainees"].pop(idx)
                 save_db(db)
                 st.success("تمّ الحذف ✅")
-                st.experimental_rerun()
+                st.rerun()
 
 # ========================== (3) الغيابات ==========================
 with tab_abs:
@@ -302,7 +299,6 @@ with tab_abs:
     # اختيارات فلترة: فرع + اختصاص
     col_f1, col_f2 = st.columns(2)
     pick_branch = col_f1.selectbox("الفرع", db["branches"], key="abs_pick_branch")
-    # الاختصاصات المتاحة ضمن هذا الفرع (حسب المتكوّنين/المواد)
     specs_in_branch = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"] == pick_branch}))
     if not specs_in_branch:
         col_f2.info("لا اختصاصات في هذا الفرع.")
@@ -327,8 +323,7 @@ with tab_abs:
 
     # معلومات السقف 10%
     total_hours = float(sub_obj.get("total_hours", 0.0))
-    limit_hours = round(total_hours * 0.10, 2)  # سقف 10%
-    # إجمالي الغيابات (غير المعذورة) المسجلة للمتكوّن في هذه المادة
+    limit_hours = round(total_hours * 0.10, 2)
     abs_for_this = [a for a in db["absences"] if a["trainee_id"]==tr_obj["id"] and a["subject_id"]==sub_obj["id"]]
     non_excused_hours = sum(float(a.get("hours", 0.0)) for a in abs_for_this if not a.get("medical_excused", False))
     remaining = max(limit_hours - non_excused_hours, 0.0)
@@ -357,10 +352,9 @@ with tab_abs:
             })
             save_db(db)
             st.success("تمّ الحفظ ✅")
-            st.experimental_rerun()
+            st.rerun()
 
     st.markdown("### ✏️ تعديل/حذف الغيابات السابقة")
-    # جدول غيابات هذا المتكوّن في هذه المادة فقط
     if not abs_for_this:
         st.info("لا توجد غيابات مسجّلة لهذه المادة.")
     else:
@@ -395,12 +389,12 @@ with tab_abs:
                 cur_abs["note"] = enote.strip()
                 save_db(db)
                 st.success("تم الحفظ ✅")
-                st.experimental_rerun()
+                st.rerun()
             if c_b2.button("🗑️ حذف السجل", key=f"abs_edit_del_{pick_id}"):
                 db["absences"] = [a for a in db["absences"] if a["id"] != pick_id]
                 save_db(db)
                 st.success("تم الحذف ✅")
-                st.experimental_rerun()
+                st.rerun()
 
 # ========================== (4) التقارير ==========================
 with tab_rpt:
@@ -412,13 +406,11 @@ with tab_rpt:
 
     col_r1, col_r2, col_r3 = st.columns(3)
     r_branch = col_r1.selectbox("الفرع", db["branches"], key="rpt_branch")
-    # الاختصاصات ضمن الفرع
     r_specs = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"] == r_branch}))
     if not r_specs:
         st.info("لا اختصاصات في هذا الفرع.")
         st.stop()
     r_spec = col_r2.selectbox("الاختصاص", r_specs, key="rpt_spec")
-    # المادة ضمن الفرع + الاختصاص
     r_subs = [s for s in db["subjects"] if s["branch"]==r_branch and s["specialty"]==r_spec]
     if not r_subs:
         st.info("لا مواد لهذا الاختصاص في هذا الفرع.")
@@ -428,7 +420,6 @@ with tab_rpt:
     r_total = float(next(s for s in db["subjects"] if s["id"]==r_sub_id)["total_hours"])
     r_limit = round(r_total*0.10, 2)
 
-    # نعدّ جدول لكل متكوّن: مجموع غياب غير معذور + الباقي
     trainees_scope = [t for t in db["trainees"] if t["branch"]==r_branch and t["specialty"]==r_spec]
     rows = []
     for t in trainees_scope:
@@ -452,7 +443,6 @@ with tab_msg:
         st.info("لا يوجد متكوّنون.")
         st.stop()
 
-    # اختيار فرع/اختصاص/مادة (باش الرسالة تتضمن حسابات صحيحة)
     col_m1, col_m2, col_m3 = st.columns(3)
     m_branch = col_m1.selectbox("الفرع", db["branches"], key="msg_branch")
     m_specs  = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"]==m_branch}))
@@ -470,12 +460,10 @@ with tab_msg:
     m_total = float(m_sub["total_hours"])
     m_limit = round(m_total*0.10, 2)
 
-    # اختيار المتكوّن
     m_trs = [t for t in db["trainees"] if t["branch"]==m_branch and t["specialty"]==m_spec]
     m_tr_pick = st.selectbox("المتكوّن", [f"{t['name']} — {t['branch']} — {t['specialty']}" for t in m_trs], key="msg_tr_pick")
     m_tr = m_trs[[f"{t['name']} — {t['branch']} — {t['specialty']}" for t in m_trs].index(m_tr_pick)]
 
-    # حساب الغيابات (غير المعذورة) في هذه المادة
     m_abs = [a for a in db["absences"] if a["trainee_id"]==m_tr["id"] and a["subject_id"]==m_sub["id"]]
     m_non_exc = sum(float(a["hours"]) for a in m_abs if not a.get("medical_excused", False))
     m_rest = max(m_limit - m_non_exc, 0.0)
