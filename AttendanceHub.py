@@ -5,12 +5,12 @@ from datetime import datetime, timedelta
 from io import StringIO
 
 # ==========================
-# English Exam — 4 Épreuves
+# English Exam — 4 Épreuves (with Audio Listening)
 # Sections: Listening • Reading (Comprehension) • Use of English • Writing
 # Levels: A1 / A2 / B1 / B2
 # ==========================
 
-st.set_page_config(page_title="English Exam — 4 Épreuves", layout="wide")
+st.set_page_config(page_title="English Exam — 4 Épreuves (Audio)", layout="wide")
 
 # ---------- Styles ----------
 st.markdown(
@@ -28,7 +28,7 @@ st.markdown(
 )
 
 st.markdown("<div class='title'>English Placement / Exam</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>4 Épreuves • Listening / Reading / Use of English / Writing</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>4 Épreuves • Listening (with Audio) / Reading / Use of English / Writing</div>", unsafe_allow_html=True)
 
 # ---------- Config ----------
 LEVEL_ORDER = ["A1", "A2", "B1", "B2"]
@@ -232,10 +232,12 @@ W_PROMPTS = {
 def init_state():
     if "started" not in st.session_state:
         st.session_state.started = False
-    for k, v in {"name": "", "level": "A1", "seed": random.randint(1, 10_000_000)}.items():
+    for k, v in {"name": "", "level": "B1", "seed": random.randint(1, 10_000_000)}.items():
         st.session_state.setdefault(k, v)
     st.session_state.setdefault("answers", {s: {} for s in SECTION_ORDER})
     st.session_state.setdefault("deadline", None)
+    # audio map: per level -> {index -> bytes}
+    st.session_state.setdefault("audio_map", {lvl: {} for lvl in LEVEL_ORDER})
 
 init_state()
 
@@ -306,6 +308,25 @@ with st.sidebar:
     st.session_state.level = st.selectbox("Level", LEVEL_ORDER, index=LEVEL_ORDER.index(st.session_state.level))
     st.session_state.seed = st.number_input("Random seed", value=st.session_state.seed, step=1, format="%d")
     st.caption("⏱ Time per section set by level. Total time shows on top.")
+
+    # Bulk audio upload for current level
+    st.subheader("🎧 Listening Audio (bulk upload)")
+    bulk_files = st.file_uploader(
+        "Upload MP3/WAV/OGG for current level (assigned by order)",
+        type=["mp3", "wav", "ogg", "m4a"],
+        accept_multiple_files=True,
+        key="bulk_audio",
+    )
+    if bulk_files:
+        # Save in the current level mapping sequentially
+        lvl = st.session_state.level
+        for i, f in enumerate(bulk_files):
+            try:
+                st.session_state.audio_map[lvl][i] = f.read()
+            except Exception:
+                pass
+        st.success(f"Assigned {len(bulk_files)} audio files to level {lvl} (L1..L{len(bulk_files)}).")
+
     if not st.session_state.started:
         if st.button("▶️ Start Exam"):
             st.session_state.answers = {s:{} for s in SECTION_ORDER}
@@ -327,7 +348,8 @@ if st.session_state.started:
         st.markdown("**Time Left**")
         st.markdown(f"<div class='kpi'>{time_left_str()}</div>", unsafe_allow_html=True)
     with k3:
-        st.info("Complete the four sections, then click Submit All at the bottom.")
+        st.info("Complete the four sections, then click Submit All at the bottom. "
+                "Upload/adjust audio any time from sidebar or each question.")
 
     if time_left_str() == "00:00":
         st.warning("Time is up! Auto-submitting your exam.")
@@ -343,11 +365,28 @@ if st.session_state.started:
     # --- Listening ---
     with tabs[0]:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.write("**Instructions:** Listen (or read transcript) and choose the correct answer.")
+        st.write("**Instructions:** Listen to the audio, then choose the correct answer."
+                 " If no audio is provided, you can use the transcript below.")
         for i, it in enumerate(L_items):
             st.markdown(f"**L{i+1}.** {it['q']}")
-            with st.expander("Transcript (if no audio)"):
-                st.caption(it["transcript"])
+            # Per-question audio uploader (overrides bulk assignment)
+            q_file = st.file_uploader(
+                f"Upload/replace audio for L{i+1}",
+                type=["mp3", "wav", "ogg", "m4a"],
+                key=f"aud_{lvl}_{i}",
+            )
+            if q_file is not None:
+                st.session_state.audio_map[lvl][i] = q_file.read()
+
+            # Play audio if found (bulk or per-question)
+            audio_bytes = st.session_state.audio_map.get(lvl, {}).get(i)
+            if audio_bytes:
+                # Let browser infer mime; mp3/ogg/wav will work
+                st.audio(audio_bytes)
+            else:
+                with st.expander("Transcript (fallback if no audio)"):
+                    st.caption(it["transcript"])
+
             st.session_state.answers["Listening"][i] = st.radio("Select one:", it["options"], index=None, key=f"L_{i}")
             st.divider()
         st.markdown("</div>", unsafe_allow_html=True)
@@ -410,4 +449,4 @@ if st.session_state.started:
         st.session_state.deadline = None
 
 else:
-    st.info("اختار المستوى واضغط Start Exam باش تبدأ الـ4 إبراڤ (Listening / Reading / Use of English / Writing).")
+    st.info("اختار المستوى واضغط Start Exam. في Listening تنجم ترفع MP3/WAV/OGG لكل سؤال أو بالجملة من الشريط الجانبي.")
