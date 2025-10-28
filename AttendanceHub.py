@@ -1,10 +1,13 @@
 # AttendanceHub.py
 # إدارة الغيابات للمتكوّنين — تخزين محلّي (JSON) — بدون Google Sheets
-# ميزات: متكوّنين + فروع + اختصاصات + مواد (ساعات/أسبوع + إجمالي ساعات) + غيابات مع شهادة طبية + واتساب للمتكوّن/الولي
+# ميزات: فروع (بكلمة سر) + اختصاصات + مواد (ساعات/أسبوع + إجمالي ساعات)
+#        متكوّنون (رقم المتكوّن + رقم الولي) + غيابات مع شهادة طبية
+#        واتساب للمتكوّن أو الولي + تقارير
+# ملاحظة: حماية الفروع بكلمة سر عبر st.secrets['branch_passwords'] (MB/BZ)
 
 import os, json, uuid
-from datetime import datetime, date
-from typing import Dict, Any, List, Optional
+from datetime import datetime, date, timedelta
+from typing import Dict, Any, List
 
 import streamlit as st
 import pandas as pd
@@ -14,7 +17,7 @@ st.set_page_config(page_title="Attendance Hub", layout="wide")
 st.markdown("""
 <div style="text-align:center">
   <h1>🧾 Attendance Hub — إدارة غيابات المتكوّنين</h1>
-  <p>فروع + اختصاصات + مواد + غيابات + واتساب</p>
+  <p>فروع (محمية بكلمة سر) + اختصاصات + مواد + غيابات + واتساب</p>
 </div>
 <hr>
 """, unsafe_allow_html=True)
@@ -30,7 +33,7 @@ def ensure_store():
         with open(DB_PATH, "w", encoding="utf-8") as f:
             json.dump({
                 "branches": ["Menzel Bourguiba", "Bizerte"],
-                "specialties": [],            # قائمة الاختصاصات 🤝
+                "specialties": [],            # قائمة الاختصاصات
                 "subjects": [],               # [{id, name, branch, specialty, weekly_hours, total_hours}]
                 "trainees": [],               # [{id, name, phone, guardian_phone, branch, specialty}]
                 "absences": []                # [{id, trainee_id, subject_id, date, hours, medical_excused, note}]
@@ -51,11 +54,8 @@ def save_db(db: Dict[str, Any]):
         json.dump(db, f, ensure_ascii=False, indent=2, default=str)
     os.replace(tmp, DB_PATH)
 
-def human_dt(ts: str|date|datetime) -> str:
-    if isinstance(ts, (date, datetime)):
-        dt = pd.to_datetime(ts)
-    else:
-        dt = pd.to_datetime(str(ts), errors="coerce")
+def human_dt(ts) -> str:
+    dt = pd.to_datetime(ts, errors="coerce")
     if pd.isna(dt): return "-"
     return dt.strftime("%Y-%m-%d")
 
@@ -77,6 +77,48 @@ def wa_link(number: str, message: str) -> str:
     if not n: return ""
     from urllib.parse import quote
     return f"https://wa.me/{n}?text={quote(message)}"
+
+# =============== حماية الفروع بكلمة سر ===============
+def _branch_passwords() -> Dict[str, str]:
+    """يقرى كلمات سر الفروع من secrets، وإلا يستعمل قيم افتراضية."""
+    try:
+        b = st.secrets["branch_passwords"]
+        return {
+            "Menzel Bourguiba": str(b.get("MB", "MB_2025!")),
+            "Bizerte": str(b.get("BZ", "BZ_2025!")),
+        }
+    except Exception:
+        return {"Menzel Bourguiba": "MB_2025!", "Bizerte": "BZ_2025!"}
+
+def _branch_unlocked(branch: str) -> bool:
+    ok = st.session_state.get(f"branch_ok::{branch}", False)
+    ts = st.session_state.get(f"branch_ok_at::{branch}")
+    if not (ok and ts): return False
+    return (datetime.now() - ts) <= timedelta(minutes=30)
+
+def branch_lock_ui(branch: str, ns_key: str):
+    """يرسم UI للفرع: إدخال كلمة سر/قفل. يوقف التاب إذا مش مفتوح."""
+    pw_map = _branch_passwords()
+    if _branch_unlocked(branch):
+        c1, c2 = st.columns([3,1])
+        c1.success(f"✅ فرع '{branch}' مفتوح (صالح لـ 30 دقيقة).")
+        if c2.button("قفل الفرع", key=f"lock::{ns_key}::{branch}"):
+            st.session_state[f"branch_ok::{branch}"] = False
+            st.session_state[f"branch_ok_at::{branch}"] = None
+            st.rerun()
+        return True
+    else:
+        st.info(f"🔐 أدخل كلمة سرّ فرع: **{branch}** للمتابعة")
+        pw_try = st.text_input("كلمة سرّ الفرع", type="password", key=f"pw::{ns_key}::{branch}")
+        if st.button("فتح الفرع", key=f"open::{ns_key}::{branch}"):
+            if pw_try == pw_map.get(branch, ""):
+                st.session_state[f"branch_ok::{branch}"] = True
+                st.session_state[f"branch_ok_at::{branch}"] = datetime.now()
+                st.success("تمّ الفتح ✅")
+                st.rerun()
+            else:
+                st.error("❌ كلمة سر غير صحيحة.")
+        st.stop()
 
 # =============== تحميل قاعدة البيانات ===============
 db = load_db()
@@ -117,7 +159,6 @@ with tab_cfg:
             if db["specialties"]:
                 del_spec = st.selectbox("🗑️ حذف اختصاص", db["specialties"], key="cfg_del_spec_sel")
                 if st.button("حذف", key="cfg_del_spec_btn"):
-                    # منع الحذف إذا مرتبط بمواد/متكوّنين
                     used_in_subjects = any(s["specialty"] == del_spec for s in db["subjects"])
                     used_in_trainees = any(t["specialty"] == del_spec for t in db["trainees"])
                     if used_in_subjects or used_in_trainees:
@@ -157,7 +198,6 @@ with tab_cfg:
             wh         = st.number_input("ساعات أسبوعية", min_value=0.0, step=1.0, key="cfg_sub_wh")
             th         = st.number_input("إجمالي ساعات المادة", min_value=0.0, step=1.0, key="cfg_sub_th")
 
-            # إضافة/تحديث
             if st.button("حفظ مادة", key="cfg_sub_save"):
                 if not sub_name.strip():
                     st.error("اسم المادة مطلوب.")
@@ -183,7 +223,6 @@ with tab_cfg:
                         save_db(db); st.success("تمّت الإضافة ✅")
                     st.rerun()
 
-            # حذف
             existing_subs = [f"{s['name']} — {s['branch']} — {s['specialty']}" for s in db["subjects"]]
             if existing_subs:
                 del_pick = st.selectbox("🗑️ اختر مادة للحذف", existing_subs, key="cfg_sub_del_pick")
@@ -202,29 +241,32 @@ with tab_cfg:
 with tab_tr:
     st.subheader("إدارة المتكوّنين")
 
-    col_tl, col_tr = st.columns([3,2])
+    # اختيار الفرع (مع كلمة سر)
+    tr_branch_view = st.selectbox("الفرع", db["branches"], key="tr_view_branch")
+    branch_lock_ui(tr_branch_view, ns_key="tab_tr")
 
-    # قائمة المتكوّنين
+    # قائمة المتكوّنين (فرع فقط)
+    col_tl, col_tr = st.columns([3,2])
     with col_tl:
-        st.write("القائمة")
-        tr_df = pd.DataFrame(db["trainees"])
+        st.write(f"القائمة — فرع {tr_branch_view}")
+        tr_df = pd.DataFrame([t for t in db["trainees"] if t["branch"] == tr_branch_view])
         if tr_df.empty:
-            st.info("لا يوجد متكوّنون بعد.")
+            st.info("لا يوجد متكوّنون بعد في هذا الفرع.")
         else:
             disp = tr_df.copy()
             disp["الاسم"] = disp["name"]
             disp["الهاتف"] = disp["phone"]
             disp["هاتف الولي"] = disp["guardian_phone"]
-            disp["الفرع"] = disp["branch"]
             disp["الاختصاص"] = disp["specialty"]
-            st.dataframe(disp[["الاسم","الهاتف","هاتف الولي","الفرع","الاختصاص"]], use_container_width=True, height=380)
+            st.dataframe(disp[["الاسم","الهاتف","هاتف الولي","الاختصاص"]], use_container_width=True, height=380)
 
-    # إضافة/تعديل/حذف
+    # إضافة/تعديل/حذف (مقيّد بالفرع المفتوح)
     with col_tr:
         st.write("➕ إضافة متكوّن")
-        t_name = st.text_input("الاسم و اللقب", key="tr_add_name")
-        t_branch = st.selectbox("الفرع", db["branches"], key="tr_add_branch")
-        t_spec = st.selectbox("الاختصاص", db["specialties"] or ["—"], key="tr_add_spec")
+        t_name  = st.text_input("الاسم و اللقب", key="tr_add_name")
+        # الفرع ثابت = المختار
+        st.selectbox("الفرع", [tr_branch_view], index=0, key="tr_add_branch_show", disabled=True)
+        t_spec  = st.selectbox("الاختصاص", db["specialties"] or ["—"], key="tr_add_spec")
         t_phone = st.text_input("هاتف المتكوّن", key="tr_add_phone")
         g_phone = st.text_input("هاتف الولي", key="tr_add_gphone")
 
@@ -237,7 +279,7 @@ with tab_tr:
                 db["trainees"].append({
                     "id": new_id(),
                     "name": t_name.strip(),
-                    "branch": t_branch,
+                    "branch": tr_branch_view,  # فرع محمي
                     "specialty": t_spec,
                     "phone": normalize_phone(t_phone),
                     "guardian_phone": normalize_phone(g_phone)
@@ -248,42 +290,47 @@ with tab_tr:
 
         st.markdown("---")
 
-        # تعديل/حذف متكوّن
-        if db["trainees"]:
+        # تعديل/حذف متكوّن (في هذا الفرع فقط)
+        tr_list = [t for t in db["trainees"] if t["branch"] == tr_branch_view]
+        if tr_list:
             edit_pick = st.selectbox("✏️ اختر متكوّن للتعديل/الحذف",
-                                     [f"{t['name']} — {t['branch']} — {t['specialty']}" for t in db["trainees"]],
+                                     [f"{t['name']} — {t['specialty']}" for t in tr_list],
                                      key="tr_edit_pick")
-            idx = [f"{t['name']} — {t['branch']} — {t['specialty']}" for t in db["trainees"]].index(edit_pick)
-            cur = db["trainees"][idx]
+            idx = [f"{t['name']} — {t['specialty']}" for t in tr_list].index(edit_pick)
+            cur = tr_list[idx]
 
-            ename = st.text_input("الاسم", value=cur["name"], key=f"tr_edit_name_{idx}")
-            ebranch = st.selectbox("الفرع", db["branches"], index=db["branches"].index(cur["branch"]), key=f"tr_edit_branch_{idx}")
-            espec = st.selectbox("الاختصاص", db["specialties"] or ["—"],
-                                 index=(db["specialties"].index(cur["specialty"]) if cur["specialty"] in db["specialties"] else 0),
-                                 key=f"tr_edit_spec_{idx}")
-            ephone = st.text_input("هاتف المتكوّن", value=cur["phone"], key=f"tr_edit_phone_{idx}")
-            egphone= st.text_input("هاتف الولي", value=cur["guardian_phone"], key=f"tr_edit_gphone_{idx}")
+            ename  = st.text_input("الاسم", value=cur["name"], key=f"tr_edit_name_{cur['id']}")
+            # الفرع ثابت
+            st.selectbox("الفرع", [tr_branch_view], index=0, key=f"tr_edit_branch_{cur['id']}", disabled=True)
+            espec  = st.selectbox("الاختصاص", db["specialties"] or ["—"],
+                                  index=(db["specialties"].index(cur["specialty"]) if cur["specialty"] in db["specialties"] else 0),
+                                  key=f"tr_edit_spec_{cur['id']}")
+            ephone = st.text_input("هاتف المتكوّن", value=cur["phone"], key=f"tr_edit_phone_{cur['id']}")
+            egphone= st.text_input("هاتف الولي", value=cur["guardian_phone"], key=f"tr_edit_gphone_{cur['id']}")
 
             c1, c2 = st.columns(2)
-            if c1.button("💾 حفظ التعديلات", key=f"tr_edit_save_{idx}"):
+            if c1.button("💾 حفظ التعديلات", key=f"tr_edit_save_{cur['id']}"):
                 if not ename.strip():
                     st.error("الاسم مطلوب.")
                 elif not espec or espec == "—":
                     st.error("الاختصاص مطلوب.")
                 else:
-                    cur["name"] = ename.strip()
-                    cur["branch"] = ebranch
-                    cur["specialty"] = espec
-                    cur["phone"] = normalize_phone(ephone)
-                    cur["guardian_phone"] = normalize_phone(egphone)
+                    # تحديث في db الأصلي
+                    for t in db["trainees"]:
+                        if t["id"] == cur["id"]:
+                            t["name"] = ename.strip()
+                            t["specialty"] = espec
+                            t["phone"] = normalize_phone(ephone)
+                            t["guardian_phone"] = normalize_phone(egphone)
+                            break
                     save_db(db)
                     st.success("تمّ الحفظ ✅")
                     st.rerun()
 
-            if c2.button("🗑️ حذف المتكوّن", key=f"tr_edit_del_{idx}"):
+            if c2.button("🗑️ حذف المتكوّن", key=f"tr_edit_del_{cur['id']}"):
                 tid = cur["id"]
                 db["absences"] = [a for a in db["absences"] if a["trainee_id"] != tid]
-                db["trainees"].pop(idx)
+                db["trainees"]  = [t for t in db["trainees"] if t["id"] != tid]
                 save_db(db)
                 st.success("تمّ الحذف ✅")
                 st.rerun()
@@ -296,32 +343,39 @@ with tab_abs:
         st.info("لا يوجد متكوّنون. أضف من تبويب المتكوّنين.")
         st.stop()
 
-    # اختيارات فلترة: فرع + اختصاص
     col_f1, col_f2 = st.columns(2)
     pick_branch = col_f1.selectbox("الفرع", db["branches"], key="abs_pick_branch")
+    # حماية الفرع
+    branch_lock_ui(pick_branch, ns_key="tab_abs")
+
     specs_in_branch = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"] == pick_branch}))
     if not specs_in_branch:
         col_f2.info("لا اختصاصات في هذا الفرع.")
         st.stop()
     pick_spec = col_f2.selectbox("الاختصاص", specs_in_branch, key="abs_pick_spec")
 
-    # اختيار المتكوّن على حسب الاختصاص
     trainees_scope = [t for t in db["trainees"] if t["branch"]==pick_branch and t["specialty"]==pick_spec]
-    tr_pick = st.selectbox("اختر المتكوّن", [f"{t['name']} — {t['branch']} — {t['specialty']}" for t in trainees_scope], key="abs_tr_pick")
-    tr_idx = [f"{t['name']} — {t['branch']} — {t['specialty']}" for t in trainees_scope].index(tr_pick)
+    if not trainees_scope:
+        st.info("لا متكوّنين في هذا الاختصاص.")
+        st.stop()
+
+    tr_pick = st.selectbox("اختر المتكوّن",
+                           [f"{t['name']} — {t['specialty']}" for t in trainees_scope],
+                           key="abs_tr_pick")
+    tr_idx = [f"{t['name']} — {t['specialty']}" for t in trainees_scope].index(tr_pick)
     tr_obj = trainees_scope[tr_idx]
 
-    # اختيار المادة ضمن (الفرع + الاختصاص)
     sub_scope = [s for s in db["subjects"] if s["branch"]==pick_branch and s["specialty"]==pick_spec]
     if not sub_scope:
         st.warning("ما فماش مواد مضبوطة لهذا الفرع/الاختصاص. أضف مواد من ضبط النظام.")
         st.stop()
 
-    sub_pick = st.selectbox("المادة", [f"{s['name']} — س/أسبوع:{s['weekly_hours']} — إجمالي:{s['total_hours']}" for s in sub_scope], key="abs_sub_pick")
+    sub_pick = st.selectbox("المادة",
+                            [f"{s['name']} — س/أسبوع:{s['weekly_hours']} — إجمالي:{s['total_hours']}" for s in sub_scope],
+                            key="abs_sub_pick")
     sub_idx = [f"{s['name']} — س/أسبوع:{s['weekly_hours']} — إجمالي:{s['total_hours']}" for s in sub_scope].index(sub_pick)
     sub_obj = sub_scope[sub_idx]
 
-    # معلومات السقف 10%
     total_hours = float(sub_obj.get("total_hours", 0.0))
     limit_hours = round(total_hours * 0.10, 2)
     abs_for_this = [a for a in db["absences"] if a["trainee_id"]==tr_obj["id"] and a["subject_id"]==sub_obj["id"]]
@@ -399,13 +453,14 @@ with tab_abs:
 # ========================== (4) التقارير ==========================
 with tab_rpt:
     st.subheader("تقارير / ملخصات")
-
     if not db["trainees"] or not db["subjects"]:
         st.info("أضف متكوّنين ومواد أولاً.")
         st.stop()
 
     col_r1, col_r2, col_r3 = st.columns(3)
     r_branch = col_r1.selectbox("الفرع", db["branches"], key="rpt_branch")
+    branch_lock_ui(r_branch, ns_key="tab_rpt")  # حماية الفرع في التقارير
+
     r_specs = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"] == r_branch}))
     if not r_specs:
         st.info("لا اختصاصات في هذا الفرع.")
@@ -445,6 +500,8 @@ with tab_msg:
 
     col_m1, col_m2, col_m3 = st.columns(3)
     m_branch = col_m1.selectbox("الفرع", db["branches"], key="msg_branch")
+    branch_lock_ui(m_branch, ns_key="tab_msg")  # حماية الفرع في الرسائل
+
     m_specs  = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"]==m_branch}))
     if not m_specs:
         st.info("لا اختصاصات في هذا الفرع.")
@@ -461,8 +518,8 @@ with tab_msg:
     m_limit = round(m_total*0.10, 2)
 
     m_trs = [t for t in db["trainees"] if t["branch"]==m_branch and t["specialty"]==m_spec]
-    m_tr_pick = st.selectbox("المتكوّن", [f"{t['name']} — {t['branch']} — {t['specialty']}" for t in m_trs], key="msg_tr_pick")
-    m_tr = m_trs[[f"{t['name']} — {t['branch']} — {t['specialty']}" for t in m_trs].index(m_tr_pick)]
+    m_tr_pick = st.selectbox("المتكوّن", [f"{t['name']} — {t['specialty']}" for t in m_trs], key="msg_tr_pick")
+    m_tr = m_trs[[f"{t['name']} — {t['specialty']}" for t in m_trs].index(m_tr_pick)]
 
     m_abs = [a for a in db["absences"] if a["trainee_id"]==m_tr["id"] and a["subject_id"]==m_sub["id"]]
     m_non_exc = sum(float(a["hours"]) for a in m_abs if not a.get("medical_excused", False))
