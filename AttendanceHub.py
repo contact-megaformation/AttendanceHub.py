@@ -1,477 +1,546 @@
+
+# AttendanceHub.py
+# إدارة الغيابات للمتكوّنين — تخزين محلّي (JSON) — بدون Google Sheets
+# ميزات: فروع (بكلمة سر) + اختصاصات + مواد (ساعات/أسبوع + إجمالي ساعات)
+#        متكوّنون (رقم المتكوّن + رقم الولي) + غيابات مع شهادة طبية
+#        واتساب للمتكوّن أو الولي + تقارير
+# ملاحظة: حماية الفروع بكلمة سر عبر st.secrets['branch_passwords'] (MB/BZ)
+
+import os, json, uuid
+from datetime import datetime, date, timedelta
+from typing import Dict, Any, List
+
 import streamlit as st
-import random
 import pandas as pd
-import json
-from datetime import datetime, timedelta
-from io import StringIO
 
-# ==========================
-# English Exam — Authoring + Audio Listening
-# ==========================
+# =============== إعداد الصفحة ===============
+st.set_page_config(page_title="Attendance Hub", layout="wide")
+st.markdown("""
+<div style="text-align:center">
+  <h1>🧾 Attendance Hub — إدارة غيابات المتكوّنين</h1>
+  <p>فروع (محمية بكلمة سر) + اختصاصات + مواد + غيابات + واتساب</p>
+</div>
+<hr>
+""", unsafe_allow_html=True)
 
-st.set_page_config(page_title="English Exam — Authoring + Audio", layout="wide")
+# =============== مسارات التخزين ===============
+ROOT = os.getcwd()
+DATA_DIR = os.path.join(ROOT, "attendance_data")
+DB_PATH  = os.path.join(DATA_DIR, "attendance_db.json")
 
-# ---------- Styles ----------
-st.markdown(
-    """
-    <style>
-      .title {text-align:center; font-size: 36px; font-weight:800; margin-bottom:0}
-      .subtitle {text-align:center; color:#555; margin-top:4px}
-      .card {background:#fff; padding:18px 20px; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,0.06); margin-bottom:12px}
-      .muted {color:#666}
-      .kpi {font-size:28px; font-weight:700}
-      .badge {display:inline-block; padding:4px 10px; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:700; font-size:12px}
-      .small {font-size:12px; color:#666}
-      .danger {color:#b91c1c}
-      .ok {color:#16a34a}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+def ensure_store():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if not os.path.exists(DB_PATH):
+        with open(DB_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "branches": ["Menzel Bourguiba", "Bizerte"],
+                "specialties": [],            # قائمة الاختصاصات
+                "subjects": [],               # [{id, name, branch, specialty, weekly_hours, total_hours}]
+                "trainees": [],               # [{id, name, phone, guardian_phone, branch, specialty}]
+                "absences": []                # [{id, trainee_id, subject_id, date, hours, medical_excused, note}]
+            }, f, ensure_ascii=False, indent=2)
 
-st.markdown("<div class='title'>English Placement / Exam</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Authoring Listening (Audio/URL) • Reading • Use of English • Writing</div>", unsafe_allow_html=True)
+def load_db() -> Dict[str, Any]:
+    ensure_store()
+    try:
+        with open(DB_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"branches": [], "specialties": [], "subjects": [], "trainees": [], "absences": []}
 
-# ---------- Config ----------
-LEVEL_ORDER = ["A1", "A2", "B1", "B2"]
-SECTION_ORDER = ["Listening", "Reading", "Use of English", "Writing"]
+def save_db(db: Dict[str, Any]):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = DB_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2, default=str)
+    os.replace(tmp, DB_PATH)
 
-LEVEL_TIME = {
-    "A1": {"Listening": 8, "Reading": 8, "Use of English": 8, "Writing": 15},
-    "A2": {"Listening": 10, "Reading": 10, "Use of English": 10, "Writing": 20},
-    "B1": {"Listening": 12, "Reading": 12, "Use of English": 12, "Writing": 25},
-    "B2": {"Listening": 15, "Reading": 15, "Use of English": 15, "Writing": 30},
-}
-PASS_MARK = 60
-Q_PER = {"Listening": 6, "Reading": 6, "Use of English": 8}
+def human_dt(ts) -> str:
+    dt = pd.to_datetime(ts, errors="coerce")
+    if pd.isna(dt): return "-"
+    return dt.strftime("%Y-%m-%d")
 
-# ---------- Default Reading / Use of English / Writing ----------
-R_PASSAGES = {
-    "A1": {
-        "text": "Maria lives in a small town near the sea. She works in a café and goes to the beach after work.",
-        "qs": [
-            ("Where does Maria live?", ["In a big city", "In a small town near the sea", "In the mountains", "In the desert"], "In a small town near the sea"),
-            ("Where does Maria work?", ["In a shop", "In a café", "In a bank", "At school"], "In a café"),
-            ("What does she do after work?", ["Goes home", "Goes to the gym", "Goes to the beach", "Studies"], "Goes to the beach"),
-            ("Maria lives __ the sea.", ["at", "near", "on", "under"], "near"),
-            ("The text says Maria works __.", ["in a café", "in an office", "from home", "at night only"], "in a café"),
-            ("The opposite of 'small' is __.", ["little", "tiny", "big", "short"], "big"),
-        ]
-    },
-    "A2": {
-        "text": "The city library moved to a larger building. Now it offers weekend workshops, free Wi-Fi, and study rooms.",
-        "qs": [
-            ("Why did the library move?", ["It was closed", "To a smaller place", "To a larger building", "For repairs"], "To a larger building"),
-            ("Which service is mentioned?", ["Paid internet", "Free Wi-Fi", "Gym", "Cinema"], "Free Wi-Fi"),
-            ("When are workshops offered?", ["Weekdays", "Weekends", "Every night", "Holidays only"], "Weekends"),
-            ("Study rooms are available __.", ["for staff only", "for students only", "for users", "for teachers"], "for users"),
-            ("The library now has more __.", ["space", "noise", "rules", "fees"], "space"),
-            ("'Offers' is closest to __.", ["gives", "buys", "sells", "hides"], "gives"),
-        ]
-    },
-    "B1": {
-        "text": "Volunteering can strengthen communities by connecting people with local needs. However, volunteers require training to be effective.",
-        "qs": [
-            ("What strengthens communities?", ["Traffic", "Volunteering", "Taxes", "Tourism"], "Volunteering"),
-            ("What do volunteers require?", ["Money", "Uniforms", "Training", "Cars"], "Training"),
-            ("Volunteering connects people with __.", ["local needs", "sports", "politics", "fashion"], "local needs"),
-            ("To be effective, volunteers need __.", ["experience only", "training", "nothing", "luck"], "training"),
-            ("The tone of the passage is __.", ["critical", "informative", "funny", "angry"], "informative"),
-            ("'However' shows __.", ["addition", "contrast", "time", "cause"], "contrast"),
-        ]
-    },
-    "B2": {
-        "text": "While renewable energy adoption is accelerating, integrating intermittent sources into aging grids demands investment and regulatory coordination.",
-        "qs": [
-            ("What is accelerating?", ["Fossil fuel use", "Renewable energy adoption", "Electricity prices", "Grid failures"], "Renewable energy adoption"),
-            ("What makes integration challenging?", ["Cheap technology", "Intermittent sources", "Abundant storage", "Public support"], "Intermittent sources"),
-            ("Grids described are __.", ["new", "aging", "perfect", "private"], "aging"),
-            ("What does integration demand?", ["No changes", "Investment and coordination", "Less regulation", "Fewer workers"], "Investment and coordination"),
-            ("'Intermittent' most nearly means __.", ["constant", "irregular", "fast", "expensive"], "irregular"),
-            ("The passage focuses on __.", ["transport", "energy policy", "education", "health"], "energy policy"),
-        ]
-    },
-}
+def new_id() -> str:
+    return uuid.uuid4().hex[:10]
 
-U_BANK = {
-    "A1": [
-        ("He __ a student.", ["am", "is", "are", "be"], "is"),
-        ("We __ in Tunis.", ["live", "lives", "living", "to live"], "live"),
-        ("There __ two apples.", ["is", "are", "be", "been"], "are"),
-        ("I __ coffee every day.", ["drink", "drinks", "drank", "drinking"], "drink"),
-        ("Choose the plural: one man → two __.", ["mans", "men", "manses", "menses"], "men"),
-        ("She __ from Spain.", ["are", "am", "is", "be"], "is"),
-        ("I go __ school by bus.", ["to", "in", "on", "at"], "to"),
-        ("Opposite of 'hot' is __.", ["warm", "cold", "heat", "cool"], "cold"),
-    ],
-    "A2": [
-        ("I have lived here __ 2019.", ["for", "since", "during", "from"], "since"),
-        ("If it rains, we __ at home.", ["stay", "will stay", "stayed", "stays"], "will stay"),
-        ("He can't __ the meeting.", ["to attend", "attends", "attend", "attending"], "attend"),
-        ("We didn't go out __ the rain.", ["because", "because of", "so", "although"], "because of"),
-        ("Choose the past: buy → __.", ["buyed", "bought", "buys", "buy"], "bought"),
-        ("You're coming, __?", ["isn't you", "aren't you", "don't you", "won't you"], "aren't you"),
-        ("I'm interested __ history.", ["in", "on", "at", "about"], "in"),
-        ("This test is __ than the last.", ["easyer", "easier", "more easy", "most easy"], "easier"),
-    ],
-    "B1": [
-        ("I wish I __ more time.", ["have", "had", "would have", "am having"], "had"),
-        ("Hardly __ the meeting begun when the alarm rang.", ["had", "has", "did", "was"], "had"),
-        ("He denied __ the window.", ["to break", "break", "breaking", "to have broke"], "breaking"),
-        ("We need someone __ can code.", ["who", "which", "whom", "what"], "who"),
-        ("Despite __ late, she finished.", ["to arrive", "arrive", "arriving", "arrived"], "arriving"),
-        ("The manager suggested that he __ earlier.", ["comes", "come", "came", "would come"], "come"),
-        ("It's high time you __.", ["come", "came", "would come", "had come"], "came"),
-        ("Make __ decision.", ["do a", "make a", "take a", "create a"], "make a"),
-    ],
-    "B2": [
-        ("No sooner __ the announcement made than shares fell.", ["was", "had", "has", "having"], "had"),
-        ("The project, __ objectives were unclear, was delayed.", ["whose", "who's", "which", "that"], "whose"),
-        ("Had I known, I __ earlier.", ["left", "would have left", "would leave", "had left"], "would have left"),
-        ("He insisted that she __ present.", ["be", "was", "is", "would be"], "be"),
-        ("The proposal was rejected on the __ that ...", ["grounds", "reasons", "basis", "causes"], "grounds"),
-        ("Seldom __ such a case.", ["I hear", "do I hear", "I have heard", "did I heard"], "do I hear"),
-        ("By the time it finishes, we __ ten modules.", ["will have completed", "completed", "have completed", "had completed"], "will have completed"),
-        ("We should consider __ a pilot program.", ["to launch", "launch", "launching", "to be launching"], "launching"),
-    ],
-}
+# =============== دوال مساعدة للواتساب ===============
+def normalize_phone(s: str) -> str:
+    s = str(s or "")
+    digits = "".join([c for c in s if c.isdigit()])
+    if digits.startswith("216"):
+        return digits
+    if len(digits) == 8:
+        return "216" + digits
+    return digits
 
-W_PROMPTS = {
-    "A1": ("Write about your daily routine (50–70 words).", ["morning", "work", "eat", "go", "home"]),
-    "A2": ("Describe your last holiday (80–100 words).", ["where", "when", "with", "activities", "feelings"]),
-    "B1": ("Do you prefer studying alone or in groups? Explain (120–150 words).", ["prefer", "because", "example", "time", "learn"]),
-    "B2": ("Some companies allow remote work. Discuss advantages and disadvantages (180–220 words).", ["productivity", "balance", "communication", "costs", "team"]),
-}
+def wa_link(number: str, message: str) -> str:
+    n = normalize_phone(number)
+    if not n: return ""
+    from urllib.parse import quote
+    return f"https://wa.me/{n}?text={quote(message)}"
 
-# ---------- State ----------
-def init_state():
-    if "started" not in st.session_state: st.session_state.started = False
-    st.session_state.setdefault("name", "")
-    st.session_state.setdefault("level", "A1")
-    st.session_state.setdefault("seed", random.randint(1, 10_000_000))
-    st.session_state.setdefault("deadline", None)
-    st.session_state.setdefault("answers", {s: {} for s in SECTION_ORDER})
-    # Authoring: custom Listening bank (per level, list of items)
-    # Each item: {q, options(list of 4), answer, transcript(str), audio_mode("upload"/"url"/"none"), audio_bytes(optional), audio_url(optional)}
-    st.session_state.setdefault("LISTENING_BANK_CUSTOM", {lvl: [] for lvl in LEVEL_ORDER})
-    st.session_state.setdefault("listening_shuffle", {lvl: False for lvl in LEVEL_ORDER})
+# =============== حماية الفروع بكلمة سر ===============
+def _branch_passwords() -> Dict[str, str]:
+    """يقرى كلمات سر الفروع من secrets، وإلا يستعمل قيم افتراضية."""
+    try:
+        b = st.secrets["branch_passwords"]
+        return {
+            "Menzel Bourguiba": str(b.get("MB", "MB_2025!")),
+            "Bizerte": str(b.get("BZ", "BZ_2025!")),
+        }
+    except Exception:
+        return {"Menzel Bourguiba": "MB_2025!", "Bizerte": "BZ_2025!"}
 
-init_state()
+def _branch_unlocked(branch: str) -> bool:
+    ok = st.session_state.get(f"branch_ok::{branch}", False)
+    ts = st.session_state.get(f"branch_ok_at::{branch}")
+    if not (ok and ts): return False
+    return (datetime.now() - ts) <= timedelta(minutes=30)
 
-# ---------- Helpers ----------
-def set_deadline(level):
-    minutes = sum(LEVEL_TIME[level].values())
-    st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
+def branch_lock_ui(branch: str, ns_key: str):
+    """يرسم UI للفرع: إدخال كلمة سر/قفل. يوقف التاب إذا مش مفتوح."""
+    pw_map = _branch_passwords()
+    if _branch_unlocked(branch):
+        c1, c2 = st.columns([3,1])
+        c1.success(f"✅ فرع '{branch}' مفتوح (صالح لـ 30 دقيقة).")
+        if c2.button("قفل الفرع", key=f"lock::{ns_key}::{branch}"):
+            st.session_state[f"branch_ok::{branch}"] = False
+            st.session_state[f"branch_ok_at::{branch}"] = None
+            st.rerun()
+        return True
+    else:
+        st.info(f"🔐 أدخل كلمة سرّ فرع: **{branch}** للمتابعة")
+        pw_try = st.text_input("كلمة سرّ الفرع", type="password", key=f"pw::{ns_key}::{branch}")
+        if st.button("فتح الفرع", key=f"open::{ns_key}::{branch}"):
+            if pw_try == pw_map.get(branch, ""):
+                st.session_state[f"branch_ok::{branch}"] = True
+                st.session_state[f"branch_ok_at::{branch}"] = datetime.now()
+                st.success("تمّ الفتح ✅")
+                st.rerun()
+            else:
+                st.error("❌ كلمة سر غير صحيحة.")
+        st.stop()
 
-def time_left_str():
-    if not st.session_state.deadline: return ""
-    left = st.session_state.deadline - datetime.utcnow()
-    if left.total_seconds() <= 0: return "00:00"
-    mm, ss = divmod(int(left.total_seconds()), 60)
-    return f"{mm:02d}:{ss:02d}"
+# =============== تحميل قاعدة البيانات ===============
+db = load_db()
 
-def reading_items(level, n):
-    data = R_PASSAGES[level]
-    qs = data["qs"][:]
-    rnd = random.Random(st.session_state.seed)
-    rnd.shuffle(qs)
-    return data["text"], qs[:n]
+# =============== Tabs ===============
+tab_cfg, tab_tr, tab_abs, tab_rpt, tab_msg = st.tabs([
+    "⚙️ ضبط النظام", "👥 المتكوّنون", "🕓 الغيابات", "📊 التقارير", "💬 الرسائل"
+])
 
-def score_mcq(items, user_map):
-    correct = 0; rows = []
-    for i, it in enumerate(items):
-        q = it["q"]; opts = it["options"]; ans = it["answer"]
-        user = user_map.get(i)
-        ok = (user == ans); correct += int(ok)
-        rows.append({"Q#": i+1, "Question": q, "User": user or "", "Correct": ans, "IsCorrect": ok})
-    pct = round(100*correct/max(1, len(items)), 1)
-    return pct, pd.DataFrame(rows)
+# ========================== (1) ضبط النظام ==========================
+with tab_cfg:
+    st.subheader("الفروع و الاختصاصات و المواد")
 
-def score_writing(text, level):
-    min_w = {"A1":50,"A2":80,"B1":120,"B2":180}[level]
-    max_w = {"A1":70,"A2":100,"B1":150,"B2":220}[level]
-    kws = W_PROMPTS[level][1]
-    wc = len(text.strip().split()) if text.strip() else 0
-    hits = sum(1 for k in kws if k.lower() in text.lower())
-    base = 40 if min_w <= wc <= max_w else 20 if wc>0 else 0
-    kw_score = min(60, hits*12)
-    pct = min(100, base + kw_score)
-    return pct, wc, hits, kws
+    # ------ إدارة الاختصاصات ------
+    with st.expander("📚 الاختصاصات", expanded=True):
+        col_s1, col_s2 = st.columns([3,2])
+        with col_s1:
+            st.write("الاختصاصات الحالية:")
+            if len(db["specialties"]) == 0:
+                st.info("لا توجد اختصاصات بعد.")
+            else:
+                st.dataframe(pd.DataFrame({"الاختصاص": db["specialties"]}), use_container_width=True)
 
-def ensure_four_options(opts):
-    # pad/trim to exactly 4
-    opts = (opts + [""]*4)[:4]
-    return opts
+        with col_s2:
+            new_spec = st.text_input("➕ إضافة اختصاص", key="cfg_add_spec_input")
+            if st.button("إضافة الاختصاص", key="cfg_add_spec_btn"):
+                spec = new_spec.strip()
+                if not spec:
+                    st.error("اكتب اسم اختصاص.")
+                elif spec in db["specialties"]:
+                    st.warning("الاختصاص موجود.")
+                else:
+                    db["specialties"].append(spec)
+                    save_db(db)
+                    st.success("تمّت الإضافة ✅")
+                    st.rerun()
 
-# ============ Admin / Authoring ============
-st.markdown("### Admin / Authoring — Listening (Audio + Questions)")
-with st.expander("Open/Close Authoring", expanded=True):
-    c1, c2 = st.columns([1,2])
-    with c1:
-        lvl = st.selectbox("Level", LEVEL_ORDER, index=LEVEL_ORDER.index(st.session_state.level), key="auth_level")
-        st.session_state.listening_shuffle[lvl] = st.checkbox("Shuffle Listening for this level", value=st.session_state.listening_shuffle[lvl])
-    with c2:
-        st.caption("Build your Listening items: for each question, add audio (upload or URL), write question, 4 options, choose the correct answer, and (optional) transcript.")
-
-    # Add new item
-    st.subheader("➕ Add / Edit Item")
-    q_text = st.text_input("Question", key="auth_q")
-    opt1 = st.text_input("Option 1", key="auth_o1")
-    opt2 = st.text_input("Option 2", key="auth_o2")
-    opt3 = st.text_input("Option 3", key="auth_o3")
-    opt4 = st.text_input("Option 4", key="auth_o4")
-    correct = st.selectbox("Correct answer", ["Option 1","Option 2","Option 3","Option 4"], index=0, key="auth_correct")
-    transcript = st.text_area("Transcript (fallback if no audio)", key="auth_trans")
-
-    audio_mode = st.radio("Audio source", ["upload","url","none"], horizontal=True, key="auth_amode")
-    audio_bytes = None; audio_url = None
-    if audio_mode == "upload":
-        f = st.file_uploader("Upload audio (mp3/wav/ogg/m4a)", type=["mp3","wav","ogg","m4a"], key="auth_file")
-        if f: audio_bytes = f.read()
-    elif audio_mode == "url":
-        audio_url = st.text_input("Audio URL (direct link to mp3/ogg/wav)", key="auth_url")
-
-    add_cols = st.columns([1,1,1])
-    with add_cols[0]:
-        if st.button("Add item"):
-            opts = ensure_four_options([opt1,opt2,opt3,opt4])
-            ans_text = opts[["Option 1","Option 2","Option 3","Option 4"].index(correct)]
-            item = {
-                "q": q_text.strip(),
-                "options": opts,
-                "answer": ans_text,
-                "transcript": transcript.strip(),
-                "audio_mode": audio_mode,
-                "audio_bytes": audio_bytes,
-                "audio_url": audio_url,
-            }
-            st.session_state.LISTENING_BANK_CUSTOM[lvl].append(item)
-            st.success("Item added.")
-    with add_cols[1]:
-        if st.button("Clear inputs"):
-            for k in ["auth_q","auth_o1","auth_o2","auth_o3","auth_o4","auth_trans","auth_url","auth_file"]:
-                if k in st.session_state: st.session_state[k] = "" if k!="auth_file" else None
+            if db["specialties"]:
+                del_spec = st.selectbox("🗑️ حذف اختصاص", db["specialties"], key="cfg_del_spec_sel")
+                if st.button("حذف", key="cfg_del_spec_btn"):
+                    used_in_subjects = any(s["specialty"] == del_spec for s in db["subjects"])
+                    used_in_trainees = any(t["specialty"] == del_spec for t in db["trainees"])
+                    if used_in_subjects or used_in_trainees:
+                        st.error("لا يمكن الحذف: الاختصاص مستعمل في مواد/متكوّنين.")
+                    else:
+                        db["specialties"] = [s for s in db["specialties"] if s != del_spec]
+                        save_db(db)
+                        st.success("تمّ الحذف ✅")
+                        st.rerun()
 
     st.markdown("---")
-    st.subheader(f"📚 Items for {lvl}")
-    bank = st.session_state.LISTENING_BANK_CUSTOM[lvl]
-    if not bank:
-        st.info("No items yet. Add some above.")
-    else:
-        # Reordering / deletion
-        for i, it in enumerate(bank):
-            with st.container():
-                st.markdown(f"**L{i+1}** — {it['q'] or '(no question)'}")
-                cc = st.columns([1,1,2,2])
-                with cc[0]:
-                    if st.button("⬆️ Up", key=f"up_{lvl}_{i}", disabled=(i==0)):
-                        bank[i-1], bank[i] = bank[i], bank[i-1]
-                        st.experimental_rerun()
-                with cc[1]:
-                    if st.button("⬇️ Down", key=f"down_{lvl}_{i}", disabled=(i==len(bank)-1)):
-                        bank[i+1], bank[i] = bank[i], bank[i+1]
-                        st.experimental_rerun()
-                with cc[2]:
-                    st.write("Correct:", f"**{it['answer']}**")
-                    st.caption(f"Options: {', '.join(it['options'])}")
-                with cc[3]:
-                    if it["audio_mode"]=="upload" and it.get("audio_bytes"):
-                        st.audio(it["audio_bytes"])
-                    elif it["audio_mode"]=="url" and it.get("audio_url"):
-                        st.audio(it["audio_url"])
-                    else:
-                        st.caption("No audio. (Transcript available)")
-                delcol = st.columns([1,6])[0]
-                with delcol:
-                    if st.button("🗑️ Delete", key=f"del_{lvl}_{i}"):
-                        bank.pop(i)
-                        st.experimental_rerun()
-                st.divider()
 
-    # Export / Import JSON
-    ex1, ex2 = st.columns(2)
-    with ex1:
-        if st.button("⬇️ Export Listening Bank (JSON)"):
-            export = json.dumps(st.session_state.LISTENING_BANK_CUSTOM, ensure_ascii=False).encode()
-            st.download_button("Download file", data=export, file_name="listening_bank_custom.json", mime="application/json", key="dl_json")
-    with ex2:
-        up = st.file_uploader("⬆️ Import Listening Bank (JSON)", type=["json"], key="imp_json")
-        if up:
-            try:
-                data = json.loads(up.read().decode())
-                # basic validation
-                if all(k in data for k in LEVEL_ORDER):
-                    st.session_state.LISTENING_BANK_CUSTOM = data
-                    st.success("Imported successfully.")
-                else:
-                    st.error("Invalid JSON structure. Missing levels.")
-            except Exception as e:
-                st.error(f"Failed to import: {e}")
+    # ------ إدارة المواد ------
+    with st.expander("📘 المواد لكل فرع + اختصاص", expanded=True):
+        col_a, col_b = st.columns(2)
 
-st.markdown("---")
-
-# ============ Exam Tabs ============
-tabs = st.tabs(["Take Exam", "Help / Notes"])
-
-# ---------- Take Exam ----------
-with tabs[0]:
-    with st.sidebar:
-        st.header("Exam Setup")
-        st.session_state.name = st.text_input("Candidate name", value=st.session_state.name, key="cand_name")
-        st.session_state.level = st.selectbox("Level", LEVEL_ORDER, index=LEVEL_ORDER.index(st.session_state.level), key="lvl_take")
-        st.session_state.seed = st.number_input("Random seed", value=st.session_state.seed, step=1, format="%d")
-        st.caption("⏱ Total time = sum of sections by level.")
-        if not st.session_state.started:
-            if st.button("▶️ Start Exam", key="start_exam"):
-                st.session_state.answers = {s: {} for s in SECTION_ORDER}
-                st.session_state.started = True
-                minutes = sum(LEVEL_TIME[st.session_state.level].values())
-                st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
-        else:
-            if st.button("🔁 Restart", key="restart_exam"):
-                st.session_state.seed = random.randint(1, 10_000_000)
-                st.session_state.answers = {s: {} for s in SECTION_ORDER}
-                minutes = sum(LEVEL_TIME[st.session_state.level].values())
-                st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
-
-    if st.session_state.started:
-        k1, k2, k3 = st.columns([1,1,2])
-        with k1:
-            st.markdown("**Level**")
-            st.markdown(f"<span class='badge'>{st.session_state.level}</span>", unsafe_allow_html=True)
-        with k2:
-            st.markdown("**Time Left**")
-            st.markdown(f"<div class='kpi'>{time_left_str()}</div>", unsafe_allow_html=True)
-        with k3:
-            st.info("Answer all sections then Submit All at the bottom.")
-
-        if time_left_str() == "00:00":
-            st.warning("Time is up! Auto-submitting your exam.")
-
-        lvl = st.session_state.level
-
-        # Listening items from custom bank
-        L_pool = list(st.session_state.LISTENING_BANK_CUSTOM[lvl])
-        if st.session_state.listening_shuffle[lvl]:
-            rnd = random.Random(st.session_state.seed)
-            rnd.shuffle(L_pool)
-        L_items = L_pool[:Q_PER["Listening"]]
-
-        # Reading / Use of English
-        R_text, R_items = reading_items(lvl, Q_PER["Reading"])
-        U_all = U_BANK[lvl][:]
-        rnd_u = random.Random(st.session_state.seed); rnd_u.shuffle(U_all)
-        U_items = [{"q": q, "options": [o1,o2,o3,o4], "answer": ans} for (q,[o1,o2,o3,o4],ans) in U_all[:Q_PER["Use of English"]]]
-
-        exam_tabs = st.tabs(SECTION_ORDER)
-
-        # Listening
-        with exam_tabs[0]:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            if not L_items:
-                st.error("No Listening items for this level. Add some in Admin / Authoring above.")
-            for i, it in enumerate(L_items):
-                st.markdown(f"**L{i+1}.** {it['q']}")
-                # audio
-                if it["audio_mode"] == "upload" and it.get("audio_bytes"):
-                    st.audio(it["audio_bytes"])
-                elif it["audio_mode"] == "url" and it.get("audio_url"):
-                    st.audio(it["audio_url"])
-                else:
-                    st.caption("No audio provided.")
-                # choices
-                st.session_state.answers["Listening"][i] = st.radio("Select one:", it["options"], index=None, key=f"LL_{i}")
-                # transcript fallback
-                if it.get("transcript"):
-                    with st.expander("Transcript"):
-                        st.caption(it["transcript"])
-                st.divider()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # Reading
-        with exam_tabs[1]:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.write("**Read the passage and answer the questions.**")
-            st.info(R_text)
-            for i, (q, opts, ans) in enumerate(R_items):
-                st.markdown(f"**R{i+1}.** {q}")
-                st.session_state.answers["Reading"][i] = st.radio("Select one:", opts, index=None, key=f"RR_{i}")
-                st.divider()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # Use of English
-        with exam_tabs[2]:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.write("**Grammar & Vocabulary.** Choose the best answer.")
-            for i, it in enumerate(U_items):
-                st.markdown(f"**U{i+1}.** {it['q']}")
-                st.session_state.answers["Use of English"][i] = st.radio("Select one:", it["options"], index=None, key=f"UU_{i}")
-                st.divider()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # Writing
-        with exam_tabs[3]:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            prompt, kws = W_PROMPTS[lvl]
-            st.write(f"**Prompt:** {prompt}")
-            st.caption(f"Try to include: {', '.join(kws)}")
-            st.session_state.answers["Writing"][0] = st.text_area("Your essay:", height=220, key="WW_0")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # Submit
-        if st.button("✅ Submit All", type="primary") or time_left_str()=="00:00":
-            if not L_items:
-                st.error("No Listening items to score.")
+        with col_a:
+            st.write("قائمة المواد")
+            if not db["subjects"]:
+                st.info("لا توجد مواد بعد.")
             else:
-                L_pct, L_df = score_mcq(L_items, st.session_state.answers["Listening"])
-            R_df_items = [{"q": q, "options": opts, "answer": ans} for (q,opts,ans) in R_items]
-            R_pct, R_df = score_mcq(R_df_items, st.session_state.answers["Reading"])
-            U_pct, U_df = score_mcq(U_items, st.session_state.answers["Use of English"])
-            W_text = st.session_state.answers["Writing"].get(0,"")
-            W_pct, wc, hits, kws = score_writing(W_text, lvl)
+                subs = pd.DataFrame(db["subjects"])
+                if not subs.empty:
+                    subs_disp = subs.copy()
+                    subs_disp["الفرع"] = subs_disp["branch"]
+                    subs_disp["الاختصاص"] = subs_disp["specialty"]
+                    subs_disp["المادة"] = subs_disp["name"]
+                    subs_disp["س/أسبوع"] = subs_disp["weekly_hours"]
+                    subs_disp["إجمالي ساعات"] = subs_disp["total_hours"]
+                    st.dataframe(subs_disp[["الفرع","الاختصاص","المادة","س/أسبوع","إجمالي ساعات"]], use_container_width=True, height=320)
 
-            overall_parts = []
-            if L_items: overall_parts.append(L_pct)
-            overall_parts += [R_pct, U_pct, W_pct]
-            overall = round(sum(overall_parts)/len(overall_parts), 1)
+        with col_b:
+            st.write("➕ إضافة/تعديل مادة")
+            branch_sel = st.selectbox("الفرع", db["branches"], key="cfg_sub_branch")
+            spec_sel   = st.selectbox("الاختصاص", db["specialties"] or ["—"], key="cfg_sub_spec")
+            sub_name   = st.text_input("اسم المادة", key="cfg_sub_name")
+            wh         = st.number_input("ساعات أسبوعية", min_value=0.0, step=1.0, key="cfg_sub_wh")
+            th         = st.number_input("إجمالي ساعات المادة", min_value=0.0, step=1.0, key="cfg_sub_th")
 
-            st.success(f"**Overall Score: {overall}%** — {'✅ PASS' if overall >= PASS_MARK else '❌ FAIL'}")
-            st.write({
-                "Listening": (L_pct if L_items else None),
-                "Reading": R_pct, "Use of English": U_pct, "Writing": W_pct
+            if st.button("حفظ مادة", key="cfg_sub_save"):
+                if not sub_name.strip():
+                    st.error("اسم المادة مطلوب.")
+                elif spec_sel == "—" or not spec_sel:
+                    st.error("اختر اختصاص.")
+                else:
+                    exist = next((s for s in db["subjects"]
+                                  if s["name"].strip().lower()==sub_name.strip().lower()
+                                  and s["branch"]==branch_sel and s["specialty"]==spec_sel), None)
+                    if exist:
+                        exist["weekly_hours"] = float(wh)
+                        exist["total_hours"]  = float(th)
+                        save_db(db); st.success("تمّ التحديث ✅")
+                    else:
+                        db["subjects"].append({
+                            "id": new_id(),
+                            "name": sub_name.strip(),
+                            "branch": branch_sel,
+                            "specialty": spec_sel,
+                            "weekly_hours": float(wh),
+                            "total_hours": float(th)
+                        })
+                        save_db(db); st.success("تمّت الإضافة ✅")
+                    st.rerun()
+
+            existing_subs = [f"{s['name']} — {s['branch']} — {s['specialty']}" for s in db["subjects"]]
+            if existing_subs:
+                del_pick = st.selectbox("🗑️ اختر مادة للحذف", existing_subs, key="cfg_sub_del_pick")
+                if st.button("حذف المادة", key="cfg_sub_del_btn"):
+                    idx = existing_subs.index(del_pick)
+                    sub_id = db["subjects"][idx]["id"]
+                    if any(a["subject_id"] == sub_id for a in db["absences"]):
+                        st.error("لا يمكن الحذف: المادة مستعملة في سجلات غياب.")
+                    else:
+                        db["subjects"].pop(idx)
+                        save_db(db)
+                        st.success("تمّ الحذف ✅")
+                        st.rerun()
+
+# ========================== (2) المتكوّنون ==========================
+with tab_tr:
+    st.subheader("إدارة المتكوّنين")
+
+    # اختيار الفرع (مع كلمة سر)
+    tr_branch_view = st.selectbox("الفرع", db["branches"], key="tr_view_branch")
+    branch_lock_ui(tr_branch_view, ns_key="tab_tr")
+
+    # قائمة المتكوّنين (فرع فقط)
+    col_tl, col_tr = st.columns([3,2])
+    with col_tl:
+        st.write(f"القائمة — فرع {tr_branch_view}")
+        tr_df = pd.DataFrame([t for t in db["trainees"] if t["branch"] == tr_branch_view])
+        if tr_df.empty:
+            st.info("لا يوجد متكوّنون بعد في هذا الفرع.")
+        else:
+            disp = tr_df.copy()
+            disp["الاسم"] = disp["name"]
+            disp["الهاتف"] = disp["phone"]
+            disp["هاتف الولي"] = disp["guardian_phone"]
+            disp["الاختصاص"] = disp["specialty"]
+            st.dataframe(disp[["الاسم","الهاتف","هاتف الولي","الاختصاص"]], use_container_width=True, height=380)
+
+    # إضافة/تعديل/حذف (مقيّد بالفرع المفتوح)
+    with col_tr:
+        st.write("➕ إضافة متكوّن")
+        t_name  = st.text_input("الاسم و اللقب", key="tr_add_name")
+        # الفرع ثابت = المختار
+        st.selectbox("الفرع", [tr_branch_view], index=0, key="tr_add_branch_show", disabled=True)
+        t_spec  = st.selectbox("الاختصاص", db["specialties"] or ["—"], key="tr_add_spec")
+        t_phone = st.text_input("هاتف المتكوّن", key="tr_add_phone")
+        g_phone = st.text_input("هاتف الولي", key="tr_add_gphone")
+
+        if st.button("إضافة", key="tr_add_btn"):
+            if not t_name.strip():
+                st.error("الاسم مطلوب.")
+            elif not t_spec or t_spec == "—":
+                st.error("الاختصاص مطلوب.")
+            else:
+                db["trainees"].append({
+                    "id": new_id(),
+                    "name": t_name.strip(),
+                    "branch": tr_branch_view,  # فرع محمي
+                    "specialty": t_spec,
+                    "phone": normalize_phone(t_phone),
+                    "guardian_phone": normalize_phone(g_phone)
+                })
+                save_db(db)
+                st.success("تمّت الإضافة ✅")
+                st.rerun()
+
+        st.markdown("---")
+
+        # تعديل/حذف متكوّن (في هذا الفرع فقط)
+        tr_list = [t for t in db["trainees"] if t["branch"] == tr_branch_view]
+        if tr_list:
+            edit_pick = st.selectbox("✏️ اختر متكوّن للتعديل/الحذف",
+                                     [f"{t['name']} — {t['specialty']}" for t in tr_list],
+                                     key="tr_edit_pick")
+            idx = [f"{t['name']} — {t['specialty']}" for t in tr_list].index(edit_pick)
+            cur = tr_list[idx]
+
+            ename  = st.text_input("الاسم", value=cur["name"], key=f"tr_edit_name_{cur['id']}")
+            # الفرع ثابت
+            st.selectbox("الفرع", [tr_branch_view], index=0, key=f"tr_edit_branch_{cur['id']}", disabled=True)
+            espec  = st.selectbox("الاختصاص", db["specialties"] or ["—"],
+                                  index=(db["specialties"].index(cur["specialty"]) if cur["specialty"] in db["specialties"] else 0),
+                                  key=f"tr_edit_spec_{cur['id']}")
+            ephone = st.text_input("هاتف المتكوّن", value=cur["phone"], key=f"tr_edit_phone_{cur['id']}")
+            egphone= st.text_input("هاتف الولي", value=cur["guardian_phone"], key=f"tr_edit_gphone_{cur['id']}")
+
+            c1, c2 = st.columns(2)
+            if c1.button("💾 حفظ التعديلات", key=f"tr_edit_save_{cur['id']}"):
+                if not ename.strip():
+                    st.error("الاسم مطلوب.")
+                elif not espec or espec == "—":
+                    st.error("الاختصاص مطلوب.")
+                else:
+                    # تحديث في db الأصلي
+                    for t in db["trainees"]:
+                        if t["id"] == cur["id"]:
+                            t["name"] = ename.strip()
+                            t["specialty"] = espec
+                            t["phone"] = normalize_phone(ephone)
+                            t["guardian_phone"] = normalize_phone(egphone)
+                            break
+                    save_db(db)
+                    st.success("تمّ الحفظ ✅")
+                    st.rerun()
+
+            if c2.button("🗑️ حذف المتكوّن", key=f"tr_edit_del_{cur['id']}"):
+                tid = cur["id"]
+                db["absences"] = [a for a in db["absences"] if a["trainee_id"] != tid]
+                db["trainees"]  = [t for t in db["trainees"] if t["id"] != tid]
+                save_db(db)
+                st.success("تمّ الحذف ✅")
+                st.rerun()
+
+# ========================== (3) الغيابات ==========================
+with tab_abs:
+    st.subheader("تسجيل الغيابات / تعديلها")
+
+    if not db["trainees"]:
+        st.info("لا يوجد متكوّنون. أضف من تبويب المتكوّنين.")
+        st.stop()
+
+    col_f1, col_f2 = st.columns(2)
+    pick_branch = col_f1.selectbox("الفرع", db["branches"], key="abs_pick_branch")
+    # حماية الفرع
+    branch_lock_ui(pick_branch, ns_key="tab_abs")
+
+    specs_in_branch = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"] == pick_branch}))
+    if not specs_in_branch:
+        col_f2.info("لا اختصاصات في هذا الفرع.")
+        st.stop()
+    pick_spec = col_f2.selectbox("الاختصاص", specs_in_branch, key="abs_pick_spec")
+
+    trainees_scope = [t for t in db["trainees"] if t["branch"]==pick_branch and t["specialty"]==pick_spec]
+    if not trainees_scope:
+        st.info("لا متكوّنين في هذا الاختصاص.")
+        st.stop()
+
+    tr_pick = st.selectbox("اختر المتكوّن",
+                           [f"{t['name']} — {t['specialty']}" for t in trainees_scope],
+                           key="abs_tr_pick")
+    tr_idx = [f"{t['name']} — {t['specialty']}" for t in trainees_scope].index(tr_pick)
+    tr_obj = trainees_scope[tr_idx]
+
+    sub_scope = [s for s in db["subjects"] if s["branch"]==pick_branch and s["specialty"]==pick_spec]
+    if not sub_scope:
+        st.warning("ما فماش مواد مضبوطة لهذا الفرع/الاختصاص. أضف مواد من ضبط النظام.")
+        st.stop()
+
+    sub_pick = st.selectbox("المادة",
+                            [f"{s['name']} — س/أسبوع:{s['weekly_hours']} — إجمالي:{s['total_hours']}" for s in sub_scope],
+                            key="abs_sub_pick")
+    sub_idx = [f"{s['name']} — س/أسبوع:{s['weekly_hours']} — إجمالي:{s['total_hours']}" for s in sub_scope].index(sub_pick)
+    sub_obj = sub_scope[sub_idx]
+
+    total_hours = float(sub_obj.get("total_hours", 0.0))
+    limit_hours = round(total_hours * 0.10, 2)
+    abs_for_this = [a for a in db["absences"] if a["trainee_id"]==tr_obj["id"] and a["subject_id"]==sub_obj["id"]]
+    non_excused_hours = sum(float(a.get("hours", 0.0)) for a in abs_for_this if not a.get("medical_excused", False))
+    remaining = max(limit_hours - non_excused_hours, 0.0)
+
+    st.info(f"سقف الغياب (10% من {total_hours} س) = **{limit_hours} س** | غير معذور مسجّل: **{non_excused_hours} س** | الباقي قبل السقف: **{remaining} س**")
+
+    st.markdown("### ➕ تسجيل غياب")
+    with st.form(f"abs_add_form_{tr_obj['id']}_{sub_obj['id']}"):
+        adate = st.date_input("التاريخ", value=date.today(), key=f"abs_add_date_{tr_obj['id']}")
+        ahours= st.number_input("عدد الساعات الغائبة", min_value=0.0, step=1.0, key=f"abs_add_hours_{tr_obj['id']}")
+        med   = st.checkbox("شهادة طبية (غياب معذور — ما يتحسبش)", key=f"abs_add_med_{tr_obj['id']}")
+        note  = st.text_area("ملاحظة (اختياري)", key=f"abs_add_note_{tr_obj['id']}")
+        subm  = st.form_submit_button("حفظ الغياب", use_container_width=True)
+    if subm:
+        if ahours <= 0:
+            st.error("الساعات لازم > 0.")
+        else:
+            db["absences"].append({
+                "id": new_id(),
+                "trainee_id": tr_obj["id"],
+                "subject_id": sub_obj["id"],
+                "date": str(adate),
+                "hours": float(ahours),
+                "medical_excused": bool(med),
+                "note": note.strip()
             })
-            st.caption(f"Writing → words={wc}, keywords matched={hits}/{len(kws)} (manual review recommended)")
+            save_db(db)
+            st.success("تمّ الحفظ ✅")
+            st.rerun()
 
-            def to_csv_bytes(df): buf = StringIO(); df.to_csv(buf, index=False); return buf.getvalue().encode()
-            if L_items:
-                st.download_button("⬇️ Listening report (CSV)", to_csv_bytes(L_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_Listening.csv")
-            st.download_button("⬇️ Reading report (CSV)", to_csv_bytes(R_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_Reading.csv")
-            st.download_button("⬇️ UseOfEnglish report (CSV)", to_csv_bytes(U_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_UseOfEnglish.csv")
+    st.markdown("### ✏️ تعديل/حذف الغيابات السابقة")
+    if not abs_for_this:
+        st.info("لا توجد غيابات مسجّلة لهذه المادة.")
+    else:
+        gdf = pd.DataFrame(abs_for_this).copy()
+        gdf["التاريخ"] = gdf["date"].apply(human_dt)
+        gdf["ساعات"] = gdf["hours"]
+        gdf["معذور؟"] = gdf["medical_excused"].apply(lambda x: "نعم" if x else "لا")
+        gdf["ملاحظة"] = gdf["note"]
+        st.dataframe(gdf[["التاريخ","ساعات","معذور؟","ملاحظة"]], use_container_width=True, height=260)
 
-            st.session_state.started = False
-            st.session_state.deadline = None
+        pick_abs = st.selectbox(
+            "اختر سجل غياب للتعديل/الحذف",
+            [f"{a['date']} — {a['hours']}س — {'معذور' if a.get('medical_excused', False) else 'غير معذور'} — {a['id']}"
+             for a in abs_for_this],
+            key=f"abs_edit_pick_{tr_obj['id']}"
+        )
+        pick_id = pick_abs.split("—")[-1].strip()
+        cur_abs = next(a for a in abs_for_this if a["id"] == pick_id)
 
-# ---------- Help / Notes ----------
-with tabs[1]:
-    st.markdown(
-        """
-        **كيفاش تربط أسئلة الـListening مع الصوت؟**
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            edate = st.date_input("التاريخ", value=pd.to_datetime(cur_abs["date"]).date(), key=f"abs_edit_date_{pick_id}")
+            ehours= st.number_input("الساعات", min_value=0.0, step=1.0, value=float(cur_abs["hours"]), key=f"abs_edit_hours_{pick_id}")
+            emed  = st.checkbox("شهادة طبية (معذور)", value=bool(cur_abs.get("medical_excused", False)), key=f"abs_edit_med_{pick_id}")
+        with col_e2:
+            enote = st.text_area("ملاحظة", value=str(cur_abs.get("note","")), key=f"abs_edit_note_{pick_id}")
+            c_b1, c_b2 = st.columns(2)
+            if c_b1.button("💾 حفظ التعديلات", key=f"abs_edit_save_{pick_id}"):
+                cur_abs["date"] = str(edate)
+                cur_abs["hours"] = float(ehours)
+                cur_abs["medical_excused"] = bool(emed)
+                cur_abs["note"] = enote.strip()
+                save_db(db)
+                st.success("تم الحفظ ✅")
+                st.rerun()
+            if c_b2.button("🗑️ حذف السجل", key=f"abs_edit_del_{pick_id}"):
+                db["absences"] = [a for a in db["absences"] if a["id"] != pick_id]
+                save_db(db)
+                st.success("تم الحذف ✅")
+                st.rerun()
 
-        - أدخل لتبويب **Admin / Authoring** فوق.
-        - اختار **المستوى** (A1/A2/B1/B2).
-        - لكل سؤال:
-          1) اختار **Audio source**:
-             - **upload**: ترفع mp3/wav/ogg/m4a
-             - **url**: تدخل رابط مباشر للصوت (mp3/ogg/wav)
-             - **none**: بلا صوت (تستعمل transcript)
-          2) اكتب **السؤال** و **4 اختيارات** و **حدّد الإجابة الصحيحة**.
-          3) (اختياري) اكتب **Transcript** باش يبان بديل للصوت.
-        - تنجم **ترتّب** الأسئلة (Up/Down) و **تمسح** اللي تحب.
-        - فعل/أوقف **Shuffle** حسب رغبتك.
-        - استعمل **Export/Import JSON** باش تحتفظ ببنك الأسئلة وتعيد استعماله.
+# ========================== (4) التقارير ==========================
+with tab_rpt:
+    st.subheader("تقارير / ملخصات")
+    if not db["trainees"] or not db["subjects"]:
+        st.info("أضف متكوّنين ومواد أولاً.")
+        st.stop()
 
-        **الامتحان**:
-        - أدخل لتبويب **Take Exam**، اختار المستوى، Start Exam.
-        - Listening يستعمل البنـك اللي حضرتو بيدك.
-        """
+    col_r1, col_r2, col_r3 = st.columns(3)
+    r_branch = col_r1.selectbox("الفرع", db["branches"], key="rpt_branch")
+    branch_lock_ui(r_branch, ns_key="tab_rpt")  # حماية الفرع في التقارير
+
+    r_specs = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"] == r_branch}))
+    if not r_specs:
+        st.info("لا اختصاصات في هذا الفرع.")
+        st.stop()
+    r_spec = col_r2.selectbox("الاختصاص", r_specs, key="rpt_spec")
+    r_subs = [s for s in db["subjects"] if s["branch"]==r_branch and s["specialty"]==r_spec]
+    if not r_subs:
+        st.info("لا مواد لهذا الاختصاص في هذا الفرع.")
+        st.stop()
+    r_sub = col_r3.selectbox("المادة", [f"{s['name']} — إجمالي:{s['total_hours']}" for s in r_subs], key="rpt_sub")
+    r_sub_id = r_subs[[f"{s['name']} — إجمالي:{s['total_hours']}" for s in r_subs].index(r_sub)]["id"]
+    r_total = float(next(s for s in db["subjects"] if s["id"]==r_sub_id)["total_hours"])
+    r_limit = round(r_total*0.10, 2)
+
+    trainees_scope = [t for t in db["trainees"] if t["branch"]==r_branch and t["specialty"]==r_spec]
+    rows = []
+    for t in trainees_scope:
+        abs_t = [a for a in db["absences"] if a["trainee_id"]==t["id"] and a["subject_id"]==r_sub_id]
+        non_exc = sum(float(a["hours"]) for a in abs_t if not a.get("medical_excused", False))
+        rows.append({
+            "المتكوّن": t["name"],
+            "الهاتف": t["phone"],
+            "هاتف الولي": t["guardian_phone"],
+            "غياب غير معذور (س)": non_exc,
+            "سقف 10% (س)": r_limit,
+            "المتبقّي قبل السقف (س)": max(r_limit - non_exc, 0.0)
+        })
+    rpt_df = pd.DataFrame(rows)
+    st.dataframe(rpt_df, use_container_width=True)
+
+# ========================== (5) الرسائل ==========================
+with tab_msg:
+    st.subheader("إرسال رسالة واتساب")
+    if not db["trainees"]:
+        st.info("لا يوجد متكوّنون.")
+        st.stop()
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    m_branch = col_m1.selectbox("الفرع", db["branches"], key="msg_branch")
+    branch_lock_ui(m_branch, ns_key="tab_msg")  # حماية الفرع في الرسائل
+
+    m_specs  = sorted(list({t["specialty"] for t in db["trainees"] if t["branch"]==m_branch}))
+    if not m_specs:
+        st.info("لا اختصاصات في هذا الفرع.")
+        st.stop()
+    m_spec   = col_m2.selectbox("الاختصاص", m_specs, key="msg_spec")
+    m_subs   = [s for s in db["subjects"] if s["branch"]==m_branch and s["specialty"]==m_spec]
+    if not m_subs:
+        st.info("لا مواد.")
+        st.stop()
+    m_sub_pick = col_m3.selectbox("المادة", [f"{s['name']} — إجمالي:{s['total_hours']}" for s in m_subs], key="msg_sub")
+
+    m_sub = m_subs[[f"{s['name']} — إجمالي:{s['total_hours']}" for s in m_subs].index(m_sub_pick)]
+    m_total = float(m_sub["total_hours"])
+    m_limit = round(m_total*0.10, 2)
+
+    m_trs = [t for t in db["trainees"] if t["branch"]==m_branch and t["specialty"]==m_spec]
+    m_tr_pick = st.selectbox("المتكوّن", [f"{t['name']} — {t['specialty']}" for t in m_trs], key="msg_tr_pick")
+    m_tr = m_trs[[f"{t['name']} — {t['specialty']}" for t in m_trs].index(m_tr_pick)]
+
+    m_abs = [a for a in db["absences"] if a["trainee_id"]==m_tr["id"] and a["subject_id"]==m_sub["id"]]
+    m_non_exc = sum(float(a["hours"]) for a in m_abs if not a.get("medical_excused", False))
+    m_rest = max(m_limit - m_non_exc, 0.0)
+
+    target = st.radio("المرسل إليه", ["المتكوّن","الولي"], horizontal=True, key=f"msg_target_radio_{m_tr['id']}")
+    base_phone = m_tr["phone"] if target == "المتكوّن" else m_tr["guardian_phone"]
+
+    default_msg = (
+        f"السلام عليكم {m_tr['name']}،\n"
+        f"بخصوص مادة: {m_sub['name']}\n"
+        f"إجمالي الساعات: {m_total} س — سقف الغياب (10%): {m_limit} س\n"
+        f"غيابات غير معذورة مسجّلة: {m_non_exc} س — المتبقي قبل تجاوز السقف: {m_rest} س.\n"
+        f"يرجى الالتزام بالحضور. شكراً."
     )
+    msg_text = st.text_area("نص الرسالة", value=default_msg, key=f"msg_text_{m_tr['id']}")
+    if st.button("📲 فتح واتساب", key=f"msg_send_btn_{m_tr['id']}"):
+        link = wa_link(base_phone, msg_text)
+        if link:
+            st.markdown(f"[افتح المحادثة الآن]({link})")
+            st.info("اضغط على الرابط لفتح واتساب.")
+        else:
+            st.error("رقم الهاتف غير صالح.")
