@@ -1,16 +1,15 @@
 import streamlit as st
 import random
 import pandas as pd
+import json
 from datetime import datetime, timedelta
 from io import StringIO
 
 # ==========================
-# English Exam — 4 Épreuves (with Audio Listening)
-# Sections: Listening • Reading (Comprehension) • Use of English • Writing
-# Levels: A1 / A2 / B1 / B2
+# English Exam — Authoring + Audio Listening
 # ==========================
 
-st.set_page_config(page_title="English Exam — 4 Épreuves (Audio)", layout="wide")
+st.set_page_config(page_title="English Exam — Authoring + Audio", layout="wide")
 
 # ---------- Styles ----------
 st.markdown(
@@ -22,19 +21,21 @@ st.markdown(
       .muted {color:#666}
       .kpi {font-size:28px; font-weight:700}
       .badge {display:inline-block; padding:4px 10px; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:700; font-size:12px}
+      .small {font-size:12px; color:#666}
+      .danger {color:#b91c1c}
+      .ok {color:#16a34a}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown("<div class='title'>English Placement / Exam</div>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>4 Épreuves • Listening (with Audio) / Reading / Use of English / Writing</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>Authoring Listening (Audio/URL) • Reading • Use of English • Writing</div>", unsafe_allow_html=True)
 
 # ---------- Config ----------
 LEVEL_ORDER = ["A1", "A2", "B1", "B2"]
 SECTION_ORDER = ["Listening", "Reading", "Use of English", "Writing"]
 
-# time per section (minutes) — total shown on top
 LEVEL_TIME = {
     "A1": {"Listening": 8, "Reading": 8, "Use of English": 8, "Writing": 15},
     "A2": {"Listening": 10, "Reading": 10, "Use of English": 10, "Writing": 20},
@@ -44,91 +45,7 @@ LEVEL_TIME = {
 PASS_MARK = 60
 Q_PER = {"Listening": 6, "Reading": 6, "Use of English": 8}
 
-# ---------- Listening Bank ----------
-L_BANK = {
-    "A1": [
-        {"q": "(Audio) 'Hello, my name is Anna. I am from Italy.' What is her name?",
-         "options": ["Ana", "Anna", "Anne", "Anaa"], "answer": "Anna",
-         "transcript": "Hello, my name is Anna. I am from Italy."},
-        {"q": "(Audio) 'The bus leaves at half past three.' What time does the bus leave?",
-         "options": ["3:30", "3:15", "3:45", "2:30"], "answer": "3:30",
-         "transcript": "The bus leaves at half past three."},
-        {"q": "(Audio) 'I work in a bank and I love my job.' Where does the speaker work?",
-         "options": ["At a school", "In a bank", "At a shop", "In a hospital"], "answer": "In a bank",
-         "transcript": "I work in a bank and I love my job."},
-        {"q": "(Audio) 'Please open the window. It's very hot.' What does the speaker want?",
-         "options": ["Close the door", "Open the window", "Turn on the TV", "Bring water"], "answer": "Open the window",
-         "transcript": "Please open the window. It's very hot."},
-        {"q": "(Audio) 'We have English on Monday and Wednesday.' When do they have English?",
-         "options": ["Monday and Friday", "Tuesday and Thursday", "Monday and Wednesday", "Saturday only"], "answer": "Monday and Wednesday",
-         "transcript": "We have English on Monday and Wednesday."},
-        {"q": "(Audio) 'My phone number is zero nine eight seven.' What's the number?",
-         "options": ["0987", "0978", "9870", "9087"], "answer": "0987",
-         "transcript": "My phone number is zero nine eight seven."},
-    ],
-    "A2": [
-        {"q": "(Audio) 'I'm looking for a cheaper hotel near the station.' What is the speaker looking for?",
-         "options": ["An expensive hotel", "A cheaper hotel near the station", "A taxi", "A restaurant"], "answer": "A cheaper hotel near the station",
-         "transcript": "I'm looking for a cheaper hotel near the station."},
-        {"q": "(Audio) 'The museum opens at 10 but the guided tour starts at 11.' When does the tour start?",
-         "options": ["10:00", "11:00", "09:30", "12:00"], "answer": "11:00",
-         "transcript": "The museum opens at 10 but the guided tour starts at 11."},
-        {"q": "(Audio) 'Could you send me the report by Friday?' What does he want?",
-         "options": ["To meet Friday", "To send the report by Friday", "To call on Friday", "To delay the report"], "answer": "To send the report by Friday",
-         "transcript": "Could you send me the report by Friday?"},
-        {"q": "(Audio) 'There's heavy traffic, so I'll be about 15 minutes late.' What is the problem?",
-         "options": ["Car broke down", "Heavy traffic", "Lost keys", "No petrol"], "answer": "Heavy traffic",
-         "transcript": "There's heavy traffic, so I'll be about 15 minutes late."},
-        {"q": "(Audio) 'Your package has arrived; you can collect it this afternoon.' What arrived?",
-         "options": ["A letter", "A package", "A person", "A taxi"], "answer": "A package",
-         "transcript": "Your package has arrived; you can collect it this afternoon."},
-        {"q": "(Audio) 'I prefer tea to coffee, especially in the evening.' What does the speaker prefer?",
-         "options": ["Coffee", "Tea", "Juice", "Water"], "answer": "Tea",
-         "transcript": "I prefer tea to coffee, especially in the evening."},
-    ],
-    "B1": [
-        {"q": "(Audio) 'Due to maintenance work, platform 3 is closed today.' What's closed?",
-         "options": ["The station", "Platform 3", "The ticket office", "The train"], "answer": "Platform 3",
-         "transcript": "Due to maintenance work, platform 3 is closed today."},
-        {"q": "(Audio) 'I'll forward you the agenda and minutes after the meeting.' What will he send?",
-         "options": ["Photos", "Agenda and minutes", "Invoice", "Invitation"], "answer": "Agenda and minutes",
-         "transcript": "I'll forward you the agenda and minutes after the meeting."},
-        {"q": "(Audio) 'The lecture has been postponed until next Thursday.' What happened to the lecture?",
-         "options": ["Cancelled", "Postponed", "Moved today", "Finished"], "answer": "Postponed",
-         "transcript": "The lecture has been postponed until next Thursday."},
-        {"q": "(Audio) 'We need to cut costs without compromising quality.' What do they need to do?",
-         "options": ["Increase costs", "Cut costs", "Hire more", "Stop production"], "answer": "Cut costs",
-         "transcript": "We need to cut costs without compromising quality."},
-        {"q": "(Audio) 'There will be scattered showers in the north.' What's the weather in the north?",
-         "options": ["Sunny", "Windy", "Showers", "Snow"], "answer": "Showers",
-         "transcript": "There will be scattered showers in the north."},
-        {"q": "(Audio) 'Passengers must keep their luggage with them at all times.' What must passengers do?",
-         "options": ["Leave luggage", "Check luggage", "Keep luggage with them", "Pay for luggage"], "answer": "Keep luggage with them",
-         "transcript": "Passengers must keep their luggage with them at all times."},
-    ],
-    "B2": [
-        {"q": "(Audio) 'Preliminary results indicate a significant rise in consumer confidence.' What do results indicate?",
-         "options": ["A fall", "No change", "A rise", "Unclear"], "answer": "A rise",
-         "transcript": "Preliminary results indicate a significant rise in consumer confidence."},
-        {"q": "(Audio) 'The panel reached a consensus after extensive deliberation.' What did the panel reach?",
-         "options": ["A conflict", "A consensus", "A vote", "A delay"], "answer": "A consensus",
-         "transcript": "The panel reached a consensus after extensive deliberation."},
-        {"q": "(Audio) 'Remote work has broadened access to global talent pools.' What has remote work done?",
-         "options": ["Reduced access", "Broadened access", "Eliminated access", "Complicated access"], "answer": "Broadened access",
-         "transcript": "Remote work has broadened access to global talent pools."},
-        {"q": "(Audio) 'The committee urged immediate implementation of the safety protocol.' What did the committee urge?",
-         "options": ["Delay", "Immediate implementation", "Cancellation", "Review"], "answer": "Immediate implementation",
-         "transcript": "The committee urged immediate implementation of the safety protocol."},
-        {"q": "(Audio) 'New findings challenge the prevailing hypothesis.' What do findings do?",
-         "options": ["Support it", "Ignore it", "Challenge it", "Prove it"], "answer": "Challenge it",
-         "transcript": "New findings challenge the prevailing hypothesis."},
-        {"q": "(Audio) 'Although promising, the pilot study had a limited sample size.' What was limited?",
-         "options": ["Budget", "Sample size", "Time", "Staff"], "answer": "Sample size",
-         "transcript": "Although promising, the pilot study had a limited sample size."},
-    ],
-}
-
-# ---------- Reading passages ----------
+# ---------- Default Reading / Use of English / Writing ----------
 R_PASSAGES = {
     "A1": {
         "text": "Maria lives in a small town near the sea. She works in a café and goes to the beach after work.",
@@ -176,7 +93,6 @@ R_PASSAGES = {
     },
 }
 
-# ---------- Use of English ----------
 U_BANK = {
     "A1": [
         ("He __ a student.", ["am", "is", "are", "be"], "is"),
@@ -220,7 +136,6 @@ U_BANK = {
     ],
 }
 
-# ---------- Writing prompts ----------
 W_PROMPTS = {
     "A1": ("Write about your daily routine (50–70 words).", ["morning", "work", "eat", "go", "home"]),
     "A2": ("Describe your last holiday (80–100 words).", ["where", "when", "with", "activities", "feelings"]),
@@ -230,31 +145,30 @@ W_PROMPTS = {
 
 # ---------- State ----------
 def init_state():
-    if "started" not in st.session_state:
-        st.session_state.started = False
-    for k, v in {"name": "", "level": "B1", "seed": random.randint(1, 10_000_000)}.items():
-        st.session_state.setdefault(k, v)
-    st.session_state.setdefault("answers", {s: {} for s in SECTION_ORDER})
+    if "started" not in st.session_state: st.session_state.started = False
+    st.session_state.setdefault("name", "")
+    st.session_state.setdefault("level", "A1")
+    st.session_state.setdefault("seed", random.randint(1, 10_000_000))
     st.session_state.setdefault("deadline", None)
-    # audio map: per level -> {index -> bytes}
-    st.session_state.setdefault("audio_map", {lvl: {} for lvl in LEVEL_ORDER})
+    st.session_state.setdefault("answers", {s: {} for s in SECTION_ORDER})
+    # Authoring: custom Listening bank (per level, list of items)
+    # Each item: {q, options(list of 4), answer, transcript(str), audio_mode("upload"/"url"/"none"), audio_bytes(optional), audio_url(optional)}
+    st.session_state.setdefault("LISTENING_BANK_CUSTOM", {lvl: [] for lvl in LEVEL_ORDER})
+    st.session_state.setdefault("listening_shuffle", {lvl: False for lvl in LEVEL_ORDER})
 
 init_state()
 
 # ---------- Helpers ----------
-def pick_items(level, bank, n):
-    """
-    Return n items for a given level.
-    - If `bank` is a dict keyed by level -> use bank[level]
-    - If `bank` is already a list -> use it directly
-    """
-    rnd = random.Random(st.session_state.seed)
-    if isinstance(bank, dict):
-        pool = list(bank.get(level, []))
-    else:
-        pool = list(bank)
-    rnd.shuffle(pool)
-    return pool[:n]
+def set_deadline(level):
+    minutes = sum(LEVEL_TIME[level].values())
+    st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
+
+def time_left_str():
+    if not st.session_state.deadline: return ""
+    left = st.session_state.deadline - datetime.utcnow()
+    if left.total_seconds() <= 0: return "00:00"
+    mm, ss = divmod(int(left.total_seconds()), 60)
+    return f"{mm:02d}:{ss:02d}"
 
 def reading_items(level, n):
     data = R_PASSAGES[level]
@@ -263,29 +177,12 @@ def reading_items(level, n):
     rnd.shuffle(qs)
     return data["text"], qs[:n]
 
-def set_deadline(level):
-    minutes = sum(LEVEL_TIME[level].values())
-    st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
-
-def time_left_str():
-    if not st.session_state.deadline:
-        return ""
-    left = st.session_state.deadline - datetime.utcnow()
-    if left.total_seconds() <= 0:
-        return "00:00"
-    mm, ss = divmod(int(left.total_seconds()), 60)
-    return f"{mm:02d}:{ss:02d}"
-
 def score_mcq(items, user_map):
-    correct = 0
-    rows = []
+    correct = 0; rows = []
     for i, it in enumerate(items):
-        q = it.get("q") if isinstance(it, dict) else it[0]
-        opts = it.get("options") if isinstance(it, dict) else it[1]
-        ans = it.get("answer") if isinstance(it, dict) else it[2]
+        q = it["q"]; opts = it["options"]; ans = it["answer"]
         user = user_map.get(i)
-        ok = (user == ans)
-        correct += int(ok)
+        ok = (user == ans); correct += int(ok)
         rows.append({"Q#": i+1, "Question": q, "User": user or "", "Correct": ans, "IsCorrect": ok})
     pct = round(100*correct/max(1, len(items)), 1)
     return pct, pd.DataFrame(rows)
@@ -301,152 +198,280 @@ def score_writing(text, level):
     pct = min(100, base + kw_score)
     return pct, wc, hits, kws
 
-# ---------- Sidebar ----------
-with st.sidebar:
-    st.header("Setup")
-    st.session_state.name = st.text_input("Candidate name", value=st.session_state.name)
-    st.session_state.level = st.selectbox("Level", LEVEL_ORDER, index=LEVEL_ORDER.index(st.session_state.level))
-    st.session_state.seed = st.number_input("Random seed", value=st.session_state.seed, step=1, format="%d")
-    st.caption("⏱ Time per section set by level. Total time shows on top.")
+def ensure_four_options(opts):
+    # pad/trim to exactly 4
+    opts = (opts + [""]*4)[:4]
+    return opts
 
-    # Bulk audio upload for current level
-    st.subheader("🎧 Listening Audio (bulk upload)")
-    bulk_files = st.file_uploader(
-        "Upload MP3/WAV/OGG for current level (assigned by order)",
-        type=["mp3", "wav", "ogg", "m4a"],
-        accept_multiple_files=True,
-        key="bulk_audio",
-    )
-    if bulk_files:
-        # Save in the current level mapping sequentially
-        lvl = st.session_state.level
-        for i, f in enumerate(bulk_files):
-            try:
-                st.session_state.audio_map[lvl][i] = f.read()
-            except Exception:
-                pass
-        st.success(f"Assigned {len(bulk_files)} audio files to level {lvl} (L1..L{len(bulk_files)}).")
+# ============ Admin / Authoring ============
+st.markdown("### Admin / Authoring — Listening (Audio + Questions)")
+with st.expander("Open/Close Authoring", expanded=True):
+    c1, c2 = st.columns([1,2])
+    with c1:
+        lvl = st.selectbox("Level", LEVEL_ORDER, index=LEVEL_ORDER.index(st.session_state.level), key="auth_level")
+        st.session_state.listening_shuffle[lvl] = st.checkbox("Shuffle Listening for this level", value=st.session_state.listening_shuffle[lvl])
+    with c2:
+        st.caption("Build your Listening items: for each question, add audio (upload or URL), write question, 4 options, choose the correct answer, and (optional) transcript.")
 
-    if not st.session_state.started:
-        if st.button("▶️ Start Exam"):
-            st.session_state.answers = {s:{} for s in SECTION_ORDER}
-            st.session_state.started = True
-            set_deadline(st.session_state.level)
+    # Add new item
+    st.subheader("➕ Add / Edit Item")
+    q_text = st.text_input("Question", key="auth_q")
+    opt1 = st.text_input("Option 1", key="auth_o1")
+    opt2 = st.text_input("Option 2", key="auth_o2")
+    opt3 = st.text_input("Option 3", key="auth_o3")
+    opt4 = st.text_input("Option 4", key="auth_o4")
+    correct = st.selectbox("Correct answer", ["Option 1","Option 2","Option 3","Option 4"], index=0, key="auth_correct")
+    transcript = st.text_area("Transcript (fallback if no audio)", key="auth_trans")
+
+    audio_mode = st.radio("Audio source", ["upload","url","none"], horizontal=True, key="auth_amode")
+    audio_bytes = None; audio_url = None
+    if audio_mode == "upload":
+        f = st.file_uploader("Upload audio (mp3/wav/ogg/m4a)", type=["mp3","wav","ogg","m4a"], key="auth_file")
+        if f: audio_bytes = f.read()
+    elif audio_mode == "url":
+        audio_url = st.text_input("Audio URL (direct link to mp3/ogg/wav)", key="auth_url")
+
+    add_cols = st.columns([1,1,1])
+    with add_cols[0]:
+        if st.button("Add item"):
+            opts = ensure_four_options([opt1,opt2,opt3,opt4])
+            ans_text = opts[["Option 1","Option 2","Option 3","Option 4"].index(correct)]
+            item = {
+                "q": q_text.strip(),
+                "options": opts,
+                "answer": ans_text,
+                "transcript": transcript.strip(),
+                "audio_mode": audio_mode,
+                "audio_bytes": audio_bytes,
+                "audio_url": audio_url,
+            }
+            st.session_state.LISTENING_BANK_CUSTOM[lvl].append(item)
+            st.success("Item added.")
+    with add_cols[1]:
+        if st.button("Clear inputs"):
+            for k in ["auth_q","auth_o1","auth_o2","auth_o3","auth_o4","auth_trans","auth_url","auth_file"]:
+                if k in st.session_state: st.session_state[k] = "" if k!="auth_file" else None
+
+    st.markdown("---")
+    st.subheader(f"📚 Items for {lvl}")
+    bank = st.session_state.LISTENING_BANK_CUSTOM[lvl]
+    if not bank:
+        st.info("No items yet. Add some above.")
     else:
-        if st.button("🔁 Restart (new shuffle)"):
-            st.session_state.seed = random.randint(1, 10_000_000)
-            st.session_state.answers = {s:{} for s in SECTION_ORDER}
-            set_deadline(st.session_state.level)
+        # Reordering / deletion
+        for i, it in enumerate(bank):
+            with st.container():
+                st.markdown(f"**L{i+1}** — {it['q'] or '(no question)'}")
+                cc = st.columns([1,1,2,2])
+                with cc[0]:
+                    if st.button("⬆️ Up", key=f"up_{lvl}_{i}", disabled=(i==0)):
+                        bank[i-1], bank[i] = bank[i], bank[i-1]
+                        st.experimental_rerun()
+                with cc[1]:
+                    if st.button("⬇️ Down", key=f"down_{lvl}_{i}", disabled=(i==len(bank)-1)):
+                        bank[i+1], bank[i] = bank[i], bank[i+1]
+                        st.experimental_rerun()
+                with cc[2]:
+                    st.write("Correct:", f"**{it['answer']}**")
+                    st.caption(f"Options: {', '.join(it['options'])}")
+                with cc[3]:
+                    if it["audio_mode"]=="upload" and it.get("audio_bytes"):
+                        st.audio(it["audio_bytes"])
+                    elif it["audio_mode"]=="url" and it.get("audio_url"):
+                        st.audio(it["audio_url"])
+                    else:
+                        st.caption("No audio. (Transcript available)")
+                delcol = st.columns([1,6])[0]
+                with delcol:
+                    if st.button("🗑️ Delete", key=f"del_{lvl}_{i}"):
+                        bank.pop(i)
+                        st.experimental_rerun()
+                st.divider()
 
-# ---------- Main ----------
-if st.session_state.started:
-    k1,k2,k3 = st.columns([1,1,2])
-    with k1:
-        st.markdown("**Level**")
-        st.markdown(f"<span class='badge'>{st.session_state.level}</span>", unsafe_allow_html=True)
-    with k2:
-        st.markdown("**Time Left**")
-        st.markdown(f"<div class='kpi'>{time_left_str()}</div>", unsafe_allow_html=True)
-    with k3:
-        st.info("Complete the four sections, then click Submit All at the bottom. "
-                "Upload/adjust audio any time from sidebar or each question.")
+    # Export / Import JSON
+    ex1, ex2 = st.columns(2)
+    with ex1:
+        if st.button("⬇️ Export Listening Bank (JSON)"):
+            export = json.dumps(st.session_state.LISTENING_BANK_CUSTOM, ensure_ascii=False).encode()
+            st.download_button("Download file", data=export, file_name="listening_bank_custom.json", mime="application/json", key="dl_json")
+    with ex2:
+        up = st.file_uploader("⬆️ Import Listening Bank (JSON)", type=["json"], key="imp_json")
+        if up:
+            try:
+                data = json.loads(up.read().decode())
+                # basic validation
+                if all(k in data for k in LEVEL_ORDER):
+                    st.session_state.LISTENING_BANK_CUSTOM = data
+                    st.success("Imported successfully.")
+                else:
+                    st.error("Invalid JSON structure. Missing levels.")
+            except Exception as e:
+                st.error(f"Failed to import: {e}")
 
-    if time_left_str() == "00:00":
-        st.warning("Time is up! Auto-submitting your exam.")
+st.markdown("---")
 
-    lvl = st.session_state.level
-    L_items = pick_items(lvl, L_BANK, Q_PER["Listening"])              # list of dicts
-    R_text, R_items = reading_items(lvl, Q_PER["Reading"])             # passage + list of tuples
-    U_raw = pick_items(lvl, U_BANK, Q_PER["Use of English"])           # list of tuples
-    U_items = [{"q": q, "options": opts, "answer": ans} for (q, opts, ans) in U_raw]  # list of dicts
+# ============ Exam Tabs ============
+tabs = st.tabs(["Take Exam", "Help / Notes"])
 
-    tabs = st.tabs(SECTION_ORDER)
+# ---------- Take Exam ----------
+with tabs[0]:
+    with st.sidebar:
+        st.header("Exam Setup")
+        st.session_state.name = st.text_input("Candidate name", value=st.session_state.name, key="cand_name")
+        st.session_state.level = st.selectbox("Level", LEVEL_ORDER, index=LEVEL_ORDER.index(st.session_state.level), key="lvl_take")
+        st.session_state.seed = st.number_input("Random seed", value=st.session_state.seed, step=1, format="%d")
+        st.caption("⏱ Total time = sum of sections by level.")
+        if not st.session_state.started:
+            if st.button("▶️ Start Exam", key="start_exam"):
+                st.session_state.answers = {s: {} for s in SECTION_ORDER}
+                st.session_state.started = True
+                minutes = sum(LEVEL_TIME[st.session_state.level].values())
+                st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
+        else:
+            if st.button("🔁 Restart", key="restart_exam"):
+                st.session_state.seed = random.randint(1, 10_000_000)
+                st.session_state.answers = {s: {} for s in SECTION_ORDER}
+                minutes = sum(LEVEL_TIME[st.session_state.level].values())
+                st.session_state.deadline = datetime.utcnow() + timedelta(minutes=minutes)
 
-    # --- Listening ---
-    with tabs[0]:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.write("**Instructions:** Listen to the audio, then choose the correct answer."
-                 " If no audio is provided, you can use the transcript below.")
-        for i, it in enumerate(L_items):
-            st.markdown(f"**L{i+1}.** {it['q']}")
-            # Per-question audio uploader (overrides bulk assignment)
-            q_file = st.file_uploader(
-                f"Upload/replace audio for L{i+1}",
-                type=["mp3", "wav", "ogg", "m4a"],
-                key=f"aud_{lvl}_{i}",
-            )
-            if q_file is not None:
-                st.session_state.audio_map[lvl][i] = q_file.read()
+    if st.session_state.started:
+        k1, k2, k3 = st.columns([1,1,2])
+        with k1:
+            st.markdown("**Level**")
+            st.markdown(f"<span class='badge'>{st.session_state.level}</span>", unsafe_allow_html=True)
+        with k2:
+            st.markdown("**Time Left**")
+            st.markdown(f"<div class='kpi'>{time_left_str()}</div>", unsafe_allow_html=True)
+        with k3:
+            st.info("Answer all sections then Submit All at the bottom.")
 
-            # Play audio if found (bulk or per-question)
-            audio_bytes = st.session_state.audio_map.get(lvl, {}).get(i)
-            if audio_bytes:
-                # Let browser infer mime; mp3/ogg/wav will work
-                st.audio(audio_bytes)
+        if time_left_str() == "00:00":
+            st.warning("Time is up! Auto-submitting your exam.")
+
+        lvl = st.session_state.level
+
+        # Listening items from custom bank
+        L_pool = list(st.session_state.LISTENING_BANK_CUSTOM[lvl])
+        if st.session_state.listening_shuffle[lvl]:
+            rnd = random.Random(st.session_state.seed)
+            rnd.shuffle(L_pool)
+        L_items = L_pool[:Q_PER["Listening"]]
+
+        # Reading / Use of English
+        R_text, R_items = reading_items(lvl, Q_PER["Reading"])
+        U_all = U_BANK[lvl][:]
+        rnd_u = random.Random(st.session_state.seed); rnd_u.shuffle(U_all)
+        U_items = [{"q": q, "options": [o1,o2,o3,o4], "answer": ans} for (q,[o1,o2,o3,o4],ans) in U_all[:Q_PER["Use of English"]]]
+
+        exam_tabs = st.tabs(SECTION_ORDER)
+
+        # Listening
+        with exam_tabs[0]:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            if not L_items:
+                st.error("No Listening items for this level. Add some in Admin / Authoring above.")
+            for i, it in enumerate(L_items):
+                st.markdown(f"**L{i+1}.** {it['q']}")
+                # audio
+                if it["audio_mode"] == "upload" and it.get("audio_bytes"):
+                    st.audio(it["audio_bytes"])
+                elif it["audio_mode"] == "url" and it.get("audio_url"):
+                    st.audio(it["audio_url"])
+                else:
+                    st.caption("No audio provided.")
+                # choices
+                st.session_state.answers["Listening"][i] = st.radio("Select one:", it["options"], index=None, key=f"LL_{i}")
+                # transcript fallback
+                if it.get("transcript"):
+                    with st.expander("Transcript"):
+                        st.caption(it["transcript"])
+                st.divider()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Reading
+        with exam_tabs[1]:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.write("**Read the passage and answer the questions.**")
+            st.info(R_text)
+            for i, (q, opts, ans) in enumerate(R_items):
+                st.markdown(f"**R{i+1}.** {q}")
+                st.session_state.answers["Reading"][i] = st.radio("Select one:", opts, index=None, key=f"RR_{i}")
+                st.divider()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Use of English
+        with exam_tabs[2]:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.write("**Grammar & Vocabulary.** Choose the best answer.")
+            for i, it in enumerate(U_items):
+                st.markdown(f"**U{i+1}.** {it['q']}")
+                st.session_state.answers["Use of English"][i] = st.radio("Select one:", it["options"], index=None, key=f"UU_{i}")
+                st.divider()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Writing
+        with exam_tabs[3]:
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            prompt, kws = W_PROMPTS[lvl]
+            st.write(f"**Prompt:** {prompt}")
+            st.caption(f"Try to include: {', '.join(kws)}")
+            st.session_state.answers["Writing"][0] = st.text_area("Your essay:", height=220, key="WW_0")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Submit
+        if st.button("✅ Submit All", type="primary") or time_left_str()=="00:00":
+            if not L_items:
+                st.error("No Listening items to score.")
             else:
-                with st.expander("Transcript (fallback if no audio)"):
-                    st.caption(it["transcript"])
+                L_pct, L_df = score_mcq(L_items, st.session_state.answers["Listening"])
+            R_df_items = [{"q": q, "options": opts, "answer": ans} for (q,opts,ans) in R_items]
+            R_pct, R_df = score_mcq(R_df_items, st.session_state.answers["Reading"])
+            U_pct, U_df = score_mcq(U_items, st.session_state.answers["Use of English"])
+            W_text = st.session_state.answers["Writing"].get(0,"")
+            W_pct, wc, hits, kws = score_writing(W_text, lvl)
 
-            st.session_state.answers["Listening"][i] = st.radio("Select one:", it["options"], index=None, key=f"L_{i}")
-            st.divider()
-        st.markdown("</div>", unsafe_allow_html=True)
+            overall_parts = []
+            if L_items: overall_parts.append(L_pct)
+            overall_parts += [R_pct, U_pct, W_pct]
+            overall = round(sum(overall_parts)/len(overall_parts), 1)
 
-    # --- Reading (Comprehension) ---
-    with tabs[1]:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.write("**Read the passage and answer the questions.**")
-        st.info(R_text)
-        for i, (q, opts, ans) in enumerate(R_items):
-            st.markdown(f"**R{i+1}.** {q}")
-            st.session_state.answers["Reading"][i] = st.radio("Select one:", opts, index=None, key=f"R_{i}")
-            st.divider()
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.success(f"**Overall Score: {overall}%** — {'✅ PASS' if overall >= PASS_MARK else '❌ FAIL'}")
+            st.write({
+                "Listening": (L_pct if L_items else None),
+                "Reading": R_pct, "Use of English": U_pct, "Writing": W_pct
+            })
+            st.caption(f"Writing → words={wc}, keywords matched={hits}/{len(kws)} (manual review recommended)")
 
-    # --- Use of English ---
-    with tabs[2]:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.write("**Grammar & Vocabulary.** Choose the best answer.")
-        for i, it in enumerate(U_items):
-            st.markdown(f"**U{i+1}.** {it['q']}")
-            st.session_state.answers["Use of English"][i] = st.radio("Select one:", it["options"], index=None, key=f"U_{i}")
-            st.divider()
-        st.markdown("</div>", unsafe_allow_html=True)
+            def to_csv_bytes(df): buf = StringIO(); df.to_csv(buf, index=False); return buf.getvalue().encode()
+            if L_items:
+                st.download_button("⬇️ Listening report (CSV)", to_csv_bytes(L_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_Listening.csv")
+            st.download_button("⬇️ Reading report (CSV)", to_csv_bytes(R_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_Reading.csv")
+            st.download_button("⬇️ UseOfEnglish report (CSV)", to_csv_bytes(U_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_UseOfEnglish.csv")
 
-    # --- Writing ---
-    with tabs[3]:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        prompt, kws = W_PROMPTS[lvl]
-        st.write(f"**Prompt:** {prompt}")
-        st.caption(f"Try to include: {', '.join(kws)}")
-        st.session_state.answers["Writing"][0] = st.text_area("Your essay:", height=220, key="W_0")
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.session_state.started = False
+            st.session_state.deadline = None
 
-    # --- Submit ---
-    if st.button("✅ Submit All", type="primary") or time_left_str()=="00:00":
-        L_pct, L_df = score_mcq(L_items, st.session_state.answers["Listening"])
-        R_df_items = [{"q": q, "options": opts, "answer": ans} for (q,opts,ans) in R_items]
-        R_pct, R_df = score_mcq(R_df_items, st.session_state.answers["Reading"])
-        U_pct, U_df = score_mcq(U_items, st.session_state.answers["Use of English"])
-        W_text = st.session_state.answers["Writing"].get(0,"")
-        W_pct, wc, hits, kws = score_writing(W_text, lvl)
+# ---------- Help / Notes ----------
+with tabs[1]:
+    st.markdown(
+        """
+        **كيفاش تربط أسئلة الـListening مع الصوت؟**
 
-        overall = round((L_pct + R_pct + U_pct + W_pct)/4, 1)
+        - أدخل لتبويب **Admin / Authoring** فوق.
+        - اختار **المستوى** (A1/A2/B1/B2).
+        - لكل سؤال:
+          1) اختار **Audio source**:
+             - **upload**: ترفع mp3/wav/ogg/m4a
+             - **url**: تدخل رابط مباشر للصوت (mp3/ogg/wav)
+             - **none**: بلا صوت (تستعمل transcript)
+          2) اكتب **السؤال** و **4 اختيارات** و **حدّد الإجابة الصحيحة**.
+          3) (اختياري) اكتب **Transcript** باش يبان بديل للصوت.
+        - تنجم **ترتّب** الأسئلة (Up/Down) و **تمسح** اللي تحب.
+        - فعل/أوقف **Shuffle** حسب رغبتك.
+        - استعمل **Export/Import JSON** باش تحتفظ ببنك الأسئلة وتعيد استعماله.
 
-        # Summary
-        st.success(f"**Overall Score: {overall}%** — {'✅ PASS' if overall >= PASS_MARK else '❌ FAIL'}")
-        st.write({"Listening": L_pct, "Reading": R_pct, "Use of English": U_pct, "Writing": W_pct})
-        st.caption(f"Writing auto-check → words={wc}, keywords matched={hits}/{len(kws)} (manual review recommended)")
-
-        # Downloads
-        def to_csv_bytes(df):
-            buf = StringIO(); df.to_csv(buf, index=False); return buf.getvalue().encode()
-        st.download_button("⬇️ Listening report (CSV)", to_csv_bytes(L_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_Listening.csv")
-        st.download_button("⬇️ Reading report (CSV)", to_csv_bytes(R_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_Reading.csv")
-        st.download_button("⬇️ UseOfEnglish report (CSV)", to_csv_bytes(U_df), file_name=f"{st.session_state.name or 'candidate'}_{lvl}_UseOfEnglish.csv")
-
-        # Reset after submit
-        st.session_state.started = False
-        st.session_state.deadline = None
-
-else:
-    st.info("اختار المستوى واضغط Start Exam. في Listening تنجم ترفع MP3/WAV/OGG لكل سؤال أو بالجملة من الشريط الجانبي.")
+        **الامتحان**:
+        - أدخل لتبويب **Take Exam**، اختار المستوى، Start Exam.
+        - Listening يستعمل البنـك اللي حضرتو بيدك.
+        """
+    )
