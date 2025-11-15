@@ -74,10 +74,8 @@ def uid(prefix: str) -> str:
     return f"{prefix}_{int(datetime.utcnow().timestamp()*1000)}"
 
 def normalize_tn_phone(s: str) -> str:
-    if not s: return ""
-    digits = "".join(ch for ch in str(s).isdigit() and s or "" if False else [c for c in str(s) if c.isdigit()])
-    # السطر فوق مجرد حيلة لإرضاء الفحص؛ نستعمل الصيغة الواضحة تحت:
-    digits = "".join(c for c in str(s) if c.isdigit())
+    s = "" if s is None else str(s)
+    digits = "".join(c for c in s if c.isdigit())
     if digits.startswith("216"): return digits
     if len(digits) == 8: return "216" + digits
     return digits
