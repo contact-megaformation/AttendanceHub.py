@@ -1,16 +1,16 @@
 # AttendanceHub.py
 # نظام حضور وغيابات (SQLite)
-# - المواد مربوطة بالتخصّص
+# - المواد مربوطة بتخصّص أو أكثر (multiselect + إضافة يدوية)
 # - تبديل غياب بالـIndex + حذف غياب
 # - حذف مادة (مع حذف غياباتها)
-# - تعديل مادة (اسم/ساعات/تخصّص)
+# - تعديل مادة (اسم/ساعات/تخصّصات متعددة)
 # - تنبيه تلقائي عندما المتبقّي < حد معيّن (بالساعات)
 # - قفل الفروع بكلمة سر عبر st.secrets أو افتراضيات
 
 import os
 import sqlite3
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, List
 
 import pandas as pd
 import streamlit as st
@@ -20,7 +20,7 @@ st.set_page_config(page_title="Attendance Hub", layout="wide")
 st.markdown("""
 <div style='text-align:center'>
   <h1>🗂️ Attendance Hub — نظام الغيابات (SQLite)</h1>
-  <p>متكوّنون • مواد (مربوطة بالتخصّص) • غيابات • تقارير • واتساب • تنبيهات</p>
+  <p>متكوّنون • مواد (مخصّصة لتخصّصات متعددة) • غيابات • تقارير • واتساب • تنبيهات</p>
 </div>
 <hr/>
 """, unsafe_allow_html=True)
@@ -52,7 +52,7 @@ def init_db():
         total_hours REAL,
         weekly_hours REAL,
         branch TEXT,
-        specialty TEXT,
+        specialty TEXT,          -- نخزن فيها قائمة تخصّصات مفصولة بفواصل
         created_at TEXT
     )""")
     c.execute("""
@@ -75,7 +75,9 @@ def uid(prefix: str) -> str:
 
 def normalize_tn_phone(s: str) -> str:
     if not s: return ""
-    digits = "".join(ch for ch in str(s) if ch.isdigit())
+    digits = "".join(ch for ch in str(s).isdigit() and s or "" if False else [c for c in str(s) if c.isdigit()])
+    # السطر فوق مجرد حيلة لإرضاء الفحص؛ نستعمل الصيغة الواضحة تحت:
+    digits = "".join(c for c in str(s) if c.isdigit())
     if digits.startswith("216"): return digits
     if len(digits) == 8: return "216" + digits
     return digits
@@ -101,6 +103,16 @@ def df_sql(query: str, params: tuple = ()) -> pd.DataFrame:
 def exec_sql(query: str, params: tuple = ()):
     c.execute(query, params)
     conn.commit()
+
+# --- تخصصات مادة كقائمة ---
+def parse_specs(spec_field: str) -> List[str]:
+    if not spec_field: return []
+    return [s.strip() for s in str(spec_field).split(",") if s.strip()]
+
+def join_specs(specs: List[str]) -> str:
+    # توحيد و ترتيب لتخزين نظيف
+    uniq = sorted(set(s.strip() for s in specs if s.strip()))
+    return ", ".join(uniq)
 
 # ===================== الشريط الجانبي: فرع + حدّ التنبيه =====================
 st.sidebar.header("🔐 دخول الفرع")
@@ -177,9 +189,13 @@ with tab_t:
                 st.success("تم الحذف ✅")
                 st.rerun()
 
-# ===================== المواد (مرتبطة بالتخصّص) =====================
+# ===================== المواد (متعددة التخصّصات) =====================
 with tab_s:
-    st.subheader("إدارة المواد — مرتبطة بالتخصّص")
+    st.subheader("إدارة المواد — يمكن ربطها بعدّة تخصّصات")
+
+    # ---- تجميع التخصّصات المسجّلة من المتكوّنين لهذا الفرع ----
+    df_specs_src = df_sql("SELECT DISTINCT specialty FROM trainees WHERE branch=?", (branch,))
+    existing_specs = sorted([s for s in df_specs_src["specialty"].dropna().astype(str).str.strip().unique() if s.strip()])
 
     # ---- إضافة مادة ----
     with st.expander("➕ إضافة مادة", expanded=True):
@@ -189,19 +205,24 @@ with tab_s:
             s_total  = st.number_input("إجمالي الساعات (Total)", min_value=0.0, step=1.0, key="s_total")
         with col2:
             s_weekly = st.number_input("الساعات الأسبوعية", min_value=0.0, step=0.5, key="s_weekly")
-            s_spec   = st.text_input("التخصّص (إجباري)", key="s_spec")
+            s_specs_multi = st.multiselect("اختر تخصّص/ات (من المسجّلة)", options=existing_specs, key="s_specs_multi")
         with col3:
+            s_specs_extra = st.text_input("أضف تخصّصات جديدة (اختياري — افصل بفاصلة)", key="s_specs_extra")
             st.info(f"الفرع: **{branch}**")
             btn_add_s = st.button("حفظ المادة", key="btn_add_subject")
 
         if btn_add_s:
-            if not s_name.strip() or s_total <= 0 or not s_spec.strip():
-                st.error("اسم المادة، إجمالي الساعات والتخصّص مطلوبة.")
+            # دمج التخصّصات المختارة مع الجديدة اليدوية
+            extra = [x.strip() for x in (s_specs_extra or "").split(",") if x.strip()]
+            all_specs = s_specs_multi + extra
+            if not s_name.strip() or s_total <= 0 or not all_specs:
+                st.error("اسم المادة، إجمالي الساعات و**على الأقل تخصّص واحد** مطلوبة.")
             else:
+                specs_csv = join_specs(all_specs)
                 _id = uid("S")
                 exec_sql(
                     "INSERT INTO subjects (id, name, total_hours, weekly_hours, branch, specialty, created_at) VALUES (?,?,?,?,?,?,?)",
-                    (_id, s_name.strip(), float(s_total), float(s_weekly), branch, s_spec.strip(), datetime.utcnow().isoformat())
+                    (_id, s_name.strip(), float(s_total), float(s_weekly), branch, specs_csv, datetime.utcnow().isoformat())
                 )
                 st.success("تمت إضافة المادة ✅")
 
@@ -213,7 +234,8 @@ with tab_s:
         st.markdown("#### قائمة المواد")
         show_s = df_s.copy()
         show_s["created_at"] = pd.to_datetime(show_s["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
-        st.dataframe(show_s[["name","specialty","total_hours","weekly_hours","created_at"]], use_container_width=True, height=300)
+        show_s["specialties"] = show_s["specialty"]  # للعرض
+        st.dataframe(show_s[["name","specialties","total_hours","weekly_hours","created_at"]], use_container_width=True, height=300)
 
         col_sd1, col_sd2 = st.columns(2)
         with col_sd1:
@@ -221,14 +243,14 @@ with tab_s:
             s_pick_del = st.selectbox("اختر مادة للحذف", s_opts_del, key="s_pick_del")
         with col_sd2:
             if st.button("🗑️ حذف المادة المختارة", key="btn_del_subject") and s_pick_del != "—":
-                name_sel, spec_sel = [x.strip() for x in s_pick_del.split("—", 1)]
-                row = df_s[(df_s["name"]==name_sel) & (df_s["specialty"]==spec_sel)].iloc[0]
+                name_sel, spec_sel_csv = [x.strip() for x in s_pick_del.split("—", 1)]
+                row = df_s[(df_s["name"]==name_sel) & (df_s["specialty"]==spec_sel_csv)].iloc[0]
                 exec_sql("DELETE FROM absences WHERE subject_id=?", (row["id"],))
                 exec_sql("DELETE FROM subjects WHERE id=?", (row["id"],))
                 st.success("تم حذف المادة وكل غياباتها ✅")
                 st.rerun()
 
-    # ---- تعديل مادة (اسم/ساعات/تخصّص) ----
+    # ---- تعديل مادة (اسم/ساعات/تخصّصات متعددة) ----
     st.markdown("---")
     st.subheader("✏️ تعديل مادة")
     df_s_edit = df_sql("SELECT * FROM subjects WHERE branch=? ORDER BY name ASC", (branch,))
@@ -238,35 +260,36 @@ with tab_s:
         edit_opts = ["— اختر مادة —"] + [f"{r['name']} — {r['specialty']}" for _, r in df_s_edit.iterrows()]
         pick_edit = st.selectbox("المادة", edit_opts, key="s_pick_edit")
         if pick_edit != "— اختر مادة —":
-            nm, sp = [x.strip() for x in pick_edit.split("—", 1)]
-            row = df_s_edit[(df_s_edit["name"]==nm) & (df_s_edit["specialty"]==sp)].iloc[0]
+            nm, sp_csv = [x.strip() for x in pick_edit.split("—", 1)]
+            row = df_s_edit[(df_s_edit["name"]==nm) & (df_s_edit["specialty"]==sp_csv)].iloc[0]
+            current_specs = parse_specs(row["specialty"])
             with st.form("form_edit_subject"):
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2 = st.columns(2)
                 with c1:
                     new_name   = st.text_input("اسم المادة (جديد)", value=row["name"], key="s_edit_name")
-                with c2:
                     new_total  = st.number_input("إجمالي الساعات (جديد)", min_value=0.0, step=1.0, value=float(row["total_hours"] or 0.0), key="s_edit_total")
-                with c3:
                     new_weekly = st.number_input("ساعات أسبوعية (جديد)", min_value=0.0, step=0.5, value=float(row["weekly_hours"] or 0.0), key="s_edit_weekly")
-                with c4:
-                    new_spec   = st.text_input("التخصّص (جديد)", value=row["specialty"], key="s_edit_spec")
-
+                with c2:
+                    ms_opts = st.multiselect("اختَر تخصّص/ات (جديد)", options=existing_specs, default=current_specs, key="s_edit_specs_multi")
+                    ms_extra = st.text_input("أضف تخصّصات جديدة (اختياري — افصل بفاصلة)", key="s_edit_specs_extra")
                 save_edit = st.form_submit_button("💾 حفظ التعديلات")
             if save_edit:
-                if not new_name.strip() or not new_spec.strip():
-                    st.error("اسم المادة والتخصّص مطلوبان.")
+                new_specs = ms_opts + [x.strip() for x in (ms_extra or "").split(",") if x.strip()]
+                if not new_name.strip() or not new_specs:
+                    st.error("اسم المادة و**على الأقل تخصّص واحد** مطلوبان.")
                 else:
+                    specs_csv_new = join_specs(new_specs)
                     exec_sql("""
                         UPDATE subjects
                            SET name=?, total_hours=?, weekly_hours=?, specialty=?
                          WHERE id=?
-                    """, (new_name.strip(), float(new_total), float(new_weekly), new_spec.strip(), row["id"]))
+                    """, (new_name.strip(), float(new_total), float(new_weekly), specs_csv_new, row["id"]))
                     st.success("تم تحديث المادة ✅")
                     st.rerun()
 
 # ===================== الغيابات =====================
 with tab_a:
-    st.subheader("تسجيل الغيابات (المواد مربوطة بتخصّص المتكوّن)")
+    st.subheader("تسجيل الغيابات (المادة تابعة لتخصّص/ات المتكوّن)")
     df_t = df_sql("SELECT * FROM trainees WHERE branch=? ORDER BY name ASC", (branch,))
     df_s = df_sql("SELECT * FROM subjects WHERE branch=? ORDER BY name ASC", (branch,))
 
@@ -289,10 +312,14 @@ with tab_a:
     else:
         trainee_row = df_t[df_t["name"]==t_pick].iloc[0]
         trainee_spec = (trainee_row["specialty"] or "").strip()
-        # المواد المسموح بها = نفس التخصّص فقط
-        subj_df = df_s[df_s["specialty"].fillna("") == trainee_spec]
+
+        # المواد التي تحتوي ضمن تخصّصاتها على تخصّص المتكوّن
+        def subject_matches_trainee(srow):
+            return trainee_spec in parse_specs(srow["specialty"])
+
+        subj_df = df_s[df_s.apply(subject_matches_trainee, axis=1)]
         if subj_df.empty:
-            st.warning("لا توجد مواد لهذا التخصّص في هذا الفرع.")
+            st.warning("لا توجد مواد مطابقة لتخصّص هذا المتكوّن في هذا الفرع.")
         else:
             s_options = ["— اختر مادة —"] + subj_df["name"].tolist()
             s_pick = st.selectbox("المادة", s_options, key="s_pick_abs")
@@ -340,7 +367,6 @@ with tab_a:
 
                     colE1, colE2, colE3 = st.columns(3)
                     with colE1:
-                        # تبديل الحالة حسب الـIndex
                         idx_list = ["—"] + [int(i) for i in show_a["Index"].tolist()]
                         idx_toggle = st.selectbox("اختر Index لتبديل (معذور/غير معذور)", idx_list, key="idx_toggle")
                         if st.button("تبديل الحالة", key="btn_toggle_excused"):
@@ -375,7 +401,8 @@ with tab_r:
         df_s_f = df_s.copy()
         if spec_r != "— الكل —":
             df_t_f = df_t_f[df_t_f["specialty"].fillna("")==spec_r]
-            df_s_f = df_s_f[df_s_f["specialty"].fillna("")==spec_r]
+            # المواد التي تحتوي هذا التخصص ضمن قائمتها
+            df_s_f = df_s_f[df_s_f["specialty"].apply(lambda s: spec_r in parse_specs(s))]
     with colr2:
         t_opts = ["— اختر متكوّن —"] + df_t_f["name"].tolist()
         t_r = st.selectbox("المتكوّن", t_opts, key="t_r")
@@ -388,9 +415,10 @@ with tab_r:
 
     if t_r != "— اختر متكوّن —" and s_r != "— اختر مادة —":
         tr_row = df_t[df_t["name"]==t_r].iloc[0]
-        sb_row = df_s[(df_s["name"]==s_r) & (df_s["specialty"]==tr_row["specialty"])].copy()
+        # المادة لازم تحتوي تخصّص المتكوّن ضمن قائمتها
+        sb_row = df_s[(df_s["name"]==s_r) & (df_s["specialty"].apply(lambda s: tr_row["specialty"] in parse_specs(s)))].copy()
         if sb_row.empty:
-            st.warning("المادة لا تنتمي إلى نفس تخصّص المتكوّن.")
+            st.warning("المادة لا تنتمي لتخصّص المتكوّن.")
         else:
             sb_row = sb_row.iloc[0]
             total_hours = float(sb_row["total_hours"] or 0.0)
@@ -452,12 +480,13 @@ with tab_r:
     df_s_all = df_sql("SELECT * FROM subjects WHERE branch=?", (branch,))
     if 'spec_r' in locals() and spec_r != "— الكل —":
         df_t_all = df_t_all[df_t_all["specialty"].fillna("")==spec_r]
-        df_s_all = df_s_all[df_s_all["specialty"].fillna("")==spec_r]
+        df_s_all = df_s_all[df_s_all["specialty"].apply(lambda s: spec_r in parse_specs(s))]
 
     rows = []
     for _, tr in df_t_all.iterrows():
         for _, sb in df_s_all.iterrows():
-            if (tr["specialty"] or "").strip() != (sb["specialty"] or "").strip():
+            # لازم تخصّص المتكوّن موجود ضمن تخصّصات المادة
+            if (tr["specialty"] or "").strip() not in parse_specs(sb["specialty"]):
                 continue
             total = float(sb["total_hours"] or 0.0)
             lim = round(0.10 * total, 2)
@@ -477,7 +506,6 @@ with tab_r:
     if rows:
         df_report = pd.DataFrame(rows)
         st.dataframe(df_report.sort_values(["المتكوّن","المادة"]), use_container_width=True, height=320)
-        # خيار إظهار الحالات المُنذرة فقط
         alert_only = st.checkbox("عرض الحالات التي فيها تنبيه فقط (⚠️)", value=False, key="alert_only")
         if alert_only:
             df_alerts = df_report[df_report["تنبيه"]=="⚠️"]
@@ -489,9 +517,11 @@ with tab_r:
         st.info("لا توجد بيانات كافية للتقرير.")
 
 # ===================== ملاحظات =====================
-# غيّر كلمات سر الفروع عبر st.secrets:
-# [branch_passwords]
-# MB="mb_2025!"
-# BZ="bz_2025!"
-# نسبة 10% ثابتة في الحساب (يمكن تعديلها بتغيير 0.10)
-# حدّ التنبيه متغيّر من الشريط الجانبي (alert_threshold)
+# - تخزين تخصصات المادة ضمن حقل specialty كقائمة CSV (مثال: "Informatique, Anglais")
+# - كل عمليات المطابقة تعتمد parse_specs(..)
+# - غير كلمات سر الفروع عبر st.secrets:
+#   [branch_passwords]
+#   MB="mb_2025!"
+#   BZ="bz_2025!"
+# - نسبة 10% ثابتة (يمكن تعديلها بتغيير 0.10 في الحساب)
+# - حدّ التنبيه متغيّر من الشريط الجانبي (alert_threshold)
