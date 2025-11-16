@@ -30,25 +30,26 @@ st.markdown(
 # ================== إعداد Google Sheets ==================
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
+
 def make_client_and_sheet_id():
     try:
+        # نحاول نخدم من secrets (أفضل حل في Streamlit Cloud)
         sa = st.secrets["gcp_service_account"]
-        sa_info = dict(sa) if hasattr(sa, "keys") else (
-            json.loads(sa) if isinstance(sa, str) else {}
-        )
+        # إذا مخزّن كـ str ولا كـ dict
+        sa_info = dict(sa) if hasattr(sa, "keys") else (json.loads(sa) if isinstance(sa, str) else {})
         creds = Credentials.from_service_account_info(sa_info, scopes=SCOPE)
         client = gspread.authorize(creds)
         sheet_id = st.secrets["SPREADSHEET_ID"]
         return client, sheet_id
     except Exception:
-        # وضع التطوير المحلي
+        # fallback: نخدم بملف service_account.json في نفس المجلد (للي يخدم local)
         creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPE)
         client = gspread.authorize(creds)
-        sheet_id = "1afzrcqKrIHh-AiwQCU-FK3nwkEUsc2Zlg5m-E1PaPrQ"
+        sheet_id = "PUT_YOUR_SHEET_ID_HERE"
         return client, sheet_id
 
 client, SPREADSHEET_ID = make_client_and_sheet_id()
-
 TRAINEES_SHEET = "Trainees"
 SUBJECTS_SHEET = "Subjects"
 ABSENCES_SHEET = "Absences"
@@ -683,4 +684,5 @@ with tab4:
                         }),
                         use_container_width=True
                     )
+
 
