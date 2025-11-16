@@ -13,7 +13,7 @@ import gspread
 import gspread.exceptions as gse
 from google.oauth2.service_account import Credentials
 import os
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
+
 # ================== إعداد الصفحة ==================
 st.set_page_config(page_title="AttendanceHub - Mega Formation", layout="wide")
 
@@ -31,18 +31,18 @@ st.markdown(
 # ================== إعداد Google Sheets ==================
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
-
 def make_client_and_sheet_id():
-    # 1) نحاول نخدم من Streamlit secrets (بيئة الكلاود)
+    """
+    نحاول أوّلًا نخدم من Streamlit secrets:
+    - gcp_service_account: يتحط كـ table في secrets مش JSON string
+    - SPREADSHEET_ID: ID متاع Google Sheet
+    وبعدها لوكال من service_account.json لو موجود.
+    """
+    # 1) Streamlit Cloud / secrets
     if "gcp_service_account" in st.secrets:
         try:
-            sa = st.secrets["gcp_service_account"]
-            # ينجم يكون str ولا dict
-            if isinstance(sa, str):
-                sa_info = json.loads(sa)
-            else:
-                sa_info = dict(sa)
+            # نتعامل مع gcp_service_account كـ table (TOML)
+            sa_info = dict(st.secrets["gcp_service_account"])
 
             creds = Credentials.from_service_account_info(sa_info, scopes=SCOPE)
             client = gspread.authorize(creds)
@@ -73,12 +73,13 @@ def make_client_and_sheet_id():
         st.error(
             "❌ لا وجدنا لا gcp_service_account في Streamlit secrets لا ملف service_account.json.\n\n"
             "▶ في Streamlit Cloud: زيد gcp_service_account و SPREADSHEET_ID في صفحة secrets.\n"
-            "▶ لو تخدم لوكال: حط ملف service_account.json في نفس فولدر AttendanceHub.py."
+            "▶ لو تخدم لوكال: حط ملف service_account.json في نفس فولدر AttendanceHub_GSheets.py."
         )
         st.stop()
 
 # استدعاء الدالة
 client, SPREADSHEET_ID = make_client_and_sheet_id()
+
 TRAINEES_SHEET = "Trainees"
 SUBJECTS_SHEET = "Subjects"
 ABSENCES_SHEET = "Absences"
@@ -617,7 +618,8 @@ with tab3:
 
                     if submit_edit_abs:
                         df_all_abs = load_absences()
-                        aid = row_a["id_x"] if "id_x" in row_a else row_a["id"]
+                        # بعد الدمج، id متاع absences يبقى في عمود "id"
+                        aid = row_a["id"]
                         mask_a = df_all_abs["id"] == aid
                         df_all_abs.loc[mask_a, "date"] = new_date.strftime("%Y-%m-%d")
                         df_all_abs.loc[mask_a, "heures_absence"] = str(new_hours)
@@ -713,7 +715,3 @@ with tab4:
                         }),
                         use_container_width=True
                     )
-
-
-
-
