@@ -34,15 +34,37 @@ SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 def make_client_and_sheet_id():
     """
     نحاول أوّلًا نخدم من Streamlit secrets:
-    - gcp_service_account: يتحط كـ table في secrets مش JSON string
+    - gcp_service_account: ينجم يكون table (TOML) ولا JSON string
     - SPREADSHEET_ID: ID متاع Google Sheet
     وبعدها لوكال من service_account.json لو موجود.
     """
-    # 1) Streamlit Cloud / secrets
     if "gcp_service_account" in st.secrets:
         try:
-            # نتعامل مع gcp_service_account كـ table (TOML)
-            sa_info = dict(st.secrets["gcp_service_account"])
+            sa = st.secrets["gcp_service_account"]
+
+            # 👉 نحاول نفهم النوع:
+            if isinstance(sa, dict) or hasattr(sa, "keys"):
+                # case: [gcp_service_account] محطوط كـ table في secrets.toml
+                sa_info = dict(sa)
+            elif isinstance(sa, str):
+                # case: محطوط JSON كامل كـ string
+                try:
+                    sa_info = json.loads(sa)
+                except Exception as e:
+                    st.error(
+                        "⚠️ gcp_service_account متخزّن كـ نص JSON لكن فيه خطأ في الفورما.\n"
+                        f"رسالة الغلط: {e}\n\n"
+                        "🔧 يا إمّا:\n"
+                        "1) تحط محتوى service_account.json كسطر JSON صحيح في secrets تحت المفتاح gcp_service_account\n"
+                        "2) ولا (المستحسن) تعملو table بالطريقة اللي شرحتها في الكود."
+                    )
+                    st.stop()
+            else:
+                st.error(
+                    "⚠️ gcp_service_account في secrets لازم يكون يا إمّا table (dict) يا إمّا JSON string.\n"
+                    f"النوع الحالي: {type(sa)}"
+                )
+                st.stop()
 
             creds = Credentials.from_service_account_info(sa_info, scopes=SCOPE)
             client = gspread.authorize(creds)
@@ -53,10 +75,30 @@ def make_client_and_sheet_id():
 
             sheet_id = st.secrets["SPREADSHEET_ID"]
             return client, sheet_id
+
         except Exception as e:
             st.error(f"⚠️ خطأ في gcp_service_account داخل secrets: {e}")
             st.stop()
 
+    # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
+    elif os.path.exists("service_account.json"):
+        try:
+            creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPE)
+            client = gspread.authorize(creds)
+            sheet_id = "PUT_YOUR_SHEET_ID_HERE"  # بدّلها لو تخدم لوكال
+            return client, sheet_id
+        except Exception as e:
+            st.error(f"⚠️ خطأ في قراءة service_account.json: {e}")
+            st.stop()
+
+    # 3) لا secrets لا ملف ⇒ نوقف ونفسّر
+    else:
+        st.error(
+            "❌ لا وجدنا لا gcp_service_account في Streamlit secrets لا ملف service_account.json.\n\n"
+            "▶ في Streamlit Cloud: زيد gcp_service_account و SPREADSHEET_ID في صفحة secrets.\n"
+            "▶ لو تخدم لوكال: حط ملف service_account.json في نفس فولدر AttendanceHub_GSheets.py."
+        )
+        st.stop()
     # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
     elif os.path.exists("service_account.json"):
         try:
@@ -715,3 +757,4 @@ with tab4:
                         }),
                         use_container_width=True
                     )
+
