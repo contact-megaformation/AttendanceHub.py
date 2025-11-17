@@ -6,13 +6,13 @@ import time
 import uuid
 import urllib.parse
 from datetime import datetime, date
-import os
 
 import pandas as pd
 import streamlit as st
 import gspread
 import gspread.exceptions as gse
 from google.oauth2.service_account import Credentials
+import os
 
 # ================== إعداد الصفحة ==================
 st.set_page_config(page_title="AttendanceHub - Mega Formation", layout="wide")
@@ -32,40 +32,12 @@ st.markdown(
 SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 
 def make_client_and_sheet_id():
-    """
-    نحاول أوّلًا نخدم من Streamlit secrets:
-    - gcp_service_account: ينجم يكون table (TOML) ولا JSON string
-    - SPREADSHEET_ID: ID متاع Google Sheet
-    وبعدها لوكال من service_account.json لو موجود.
-    """
+    # 1) نخدم من Streamlit secrets (بيئة الكلاود)
     if "gcp_service_account" in st.secrets:
         try:
             sa = st.secrets["gcp_service_account"]
-
-            # 👉 نفهم النوع
-            if isinstance(sa, dict) or hasattr(sa, "keys"):
-                # case: [gcp_service_account] محطوط كـ table في secrets.toml
-                sa_info = dict(sa)
-            elif isinstance(sa, str):
-                # case: محطوط JSON كامل كـ string
-                try:
-                    sa_info = json.loads(sa)
-                except Exception as e:
-                    st.error(
-                        "⚠️ gcp_service_account متخزّن كـ نص JSON لكن فيه خطأ في الفورما.\n"
-                        f"رسالة الغلط: {e}\n\n"
-                        "🔧 يا إمّا:\n"
-                        "1) تحط محتوى service_account.json كسطر JSON صحيح في secrets تحت المفتاح gcp_service_account\n"
-                        "2) ولا (المستحسن) تعملو table بالطريقة الموصى بها."
-                    )
-                    st.stop()
-            else:
-                st.error(
-                    "⚠️ gcp_service_account في secrets لازم يكون يا إمّا table (dict) يا إمّا JSON string.\n"
-                    f"النوع الحالي: {type(sa)}"
-                )
-                st.stop()
-
+            # ينجم يكون dict (TOML table)
+            sa_info = dict(sa)
             creds = Credentials.from_service_account_info(sa_info, scopes=SCOPE)
             client = gspread.authorize(creds)
 
@@ -75,28 +47,27 @@ def make_client_and_sheet_id():
 
             sheet_id = st.secrets["SPREADSHEET_ID"]
             return client, sheet_id
-
         except Exception as e:
             st.error(f"⚠️ خطأ في gcp_service_account داخل secrets: {e}")
             st.stop()
 
+    # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
     elif os.path.exists("service_account.json"):
-        # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
         try:
             creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPE)
             client = gspread.authorize(creds)
-            # بدّلها بـ ID الصحيح لو تخدم لوكال
-            sheet_id = "PUT_YOUR_SHEET_ID_HERE"
+            sheet_id = "PUT_YOUR_SHEET_ID_HERE"  # بدّلها لو تخدم لوكال
             return client, sheet_id
         except Exception as e:
             st.error(f"⚠️ خطأ في قراءة service_account.json: {e}")
             st.stop()
+
+    # 3) لا secrets لا ملف ⇒ نوقف ونفسّر
     else:
-        # 3) لا secrets لا ملف ⇒ نوقف ونفسّر
         st.error(
             "❌ لا وجدنا لا gcp_service_account في Streamlit secrets لا ملف service_account.json.\n\n"
             "▶ في Streamlit Cloud: زيد gcp_service_account و SPREADSHEET_ID في صفحة secrets.\n"
-            "▶ لو تخدم لوكال: حط ملف service_account.json في نفس فولدر AttendanceHub_GSheets.py."
+            "▶ لو تخدم لوكال: حط ملف service_account.json في نفس فولدر AttendanceHub.py."
         )
         st.stop()
 
@@ -124,6 +95,7 @@ ABSENCES_COLS = [
     "justifie", "commentaire"
 ]
 
+# ============= Utils Sheets =============
 def get_spreadsheet():
     if st.session_state.get("sh_id") == SPREADSHEET_ID and "sh_obj" in st.session_state:
         return st.session_state["sh_obj"]
@@ -152,6 +124,54 @@ def ensure_ws(title: str, columns: list[str]):
     if not header or header[:len(columns)] != columns:
         ws.update("1:1", [columns])
     return ws
+
+def append_record(sheet_name: str, cols: list[str], rec: dict):
+    """إضافة سطر جديد باستعمال append_row (أخفّ على Google API)."""
+    ws = ensure_ws(sheet_name, cols)
+    row = [str(rec.get(c, "")) for c in cols]
+    ws.append_row(row)
+    st.cache_data.clear()
+
+def delete_record_by_id(sheet_name: str, cols: list[str], rec_id: str):
+    """حذف سطر حسب id بدون ري-رايت للشيت كامل."""
+    ws = ensure_ws(sheet_name, cols)
+    vals = ws.get_all_values()
+    if not vals or len(vals) < 2:
+        return
+    header = vals[0]
+    if "id" in header:
+        id_idx = header.index("id")
+    else:
+        id_idx = 0
+    # نبدأ من الصف 2 (index=1 في القائمة، row_index=2 في الشيت)
+    for i, r in enumerate(vals[1:], start=2):
+        if len(r) > id_idx and r[id_idx] == rec_id:
+            ws.delete_rows(i)
+            st.cache_data.clear()
+            break
+
+def update_record_fields_by_id(sheet_name: str, cols: list[str], rec_id: str, updates: dict):
+    """تعديل بعض الأعمدة في سطر معيّن حسب id."""
+    ws = ensure_ws(sheet_name, cols)
+    vals = ws.get_all_values()
+    if not vals or len(vals) < 2:
+        return
+    header = vals[0]
+    if "id" not in header:
+        return
+    id_idx = header.index("id")
+    row_idx = None
+    for i, r in enumerate(vals[1:], start=2):
+        if len(r) > id_idx and r[id_idx] == rec_id:
+            row_idx = i
+            break
+    if not row_idx:
+        return
+    for field, value in updates.items():
+        if field in header:
+            col_idx = header.index(field) + 1
+            ws.update_cell(row_idx, col_idx, str(value))
+    st.cache_data.clear()
 
 # ================== Helpers ==================
 def normalize_phone(s: str) -> str:
@@ -209,18 +229,6 @@ def load_absences():
         return pd.DataFrame(columns=ABSENCES_COLS)
     return pd.DataFrame(vals[1:], columns=vals[0])
 
-def save_df_to_sheet(df: pd.DataFrame, sheet_name: str, cols: list[str]):
-    ws = ensure_ws(sheet_name, cols)
-    if df.empty:
-        ws.clear()
-        ws.update("1:1", [cols])
-    else:
-        df = df[cols].copy()
-        rows = [cols] + df.astype(str).values.tolist()
-        ws.clear()
-        ws.update("1:1", rows)
-    st.cache_data.clear()
-
 # ================== Sidebar: اختيار الفرع + المودباس ==================
 st.sidebar.markdown("## ⚙️ إعدادات الفرع")
 
@@ -277,7 +285,6 @@ with tab1:
         if not nom.strip() or not tel.strip() or not spec.strip():
             st.error("❌ الاسم، الهاتف، والتخصّص إجباريين.")
         else:
-            df_all_tr = load_trainees()
             new_id = uuid.uuid4().hex[:10]
             new_row = {
                 "id": new_id,
@@ -289,13 +296,12 @@ with tab1:
                 "date_debut": dt_deb.strftime("%Y-%m-%d"),
                 "actif": "1",
             }
-            df_new = pd.concat(
-                [df_all_tr, pd.DataFrame([new_row])],
-                ignore_index=True
-            )
-            save_df_to_sheet(df_new, TRAINEES_SHEET, TRAINEES_COLS)
-            st.success("✅ تم إضافة المتكوّن.")
-            st.rerun()
+            try:
+                append_record(TRAINEES_SHEET, TRAINEES_COLS, new_row)
+                st.success("✅ تم إضافة المتكوّن.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"خطأ أثناء إضافة المتكوّن: {e}")
 
     st.markdown("### 📋 قائمة المتكوّنين في هذا الفرع")
     if df_tr.empty:
@@ -317,9 +323,7 @@ with tab1:
                 try:
                     idx = int(pick_tr_del.split("]")[0].replace("[", "").strip())
                     tr_id = df_tr.iloc[idx]["id"]
-                    df_all_tr = load_trainees()
-                    df_all_tr = df_all_tr[df_all_tr["id"] != tr_id]
-                    save_df_to_sheet(df_all_tr, TRAINEES_SHEET, TRAINEES_COLS)
+                    delete_record_by_id(TRAINEES_SHEET, TRAINEES_COLS, tr_id)
                     st.success("✅ تم الحذف.")
                     st.rerun()
                 except Exception as e:
@@ -359,7 +363,6 @@ with tab2:
         elif not spec_choices:
             st.error("❌ اختر على الأقل تخصّص واحد للمادة.")
         else:
-            df_all_sub = load_subjects()
             new_id = uuid.uuid4().hex[:10]
             rec = {
                 "id": new_id,
@@ -369,13 +372,12 @@ with tab2:
                 "heures_totales": str(heures_tot),
                 "heures_semaine": str(heures_week),
             }
-            df_all_sub = pd.concat(
-                [df_all_sub, pd.DataFrame([rec])],
-                ignore_index=True
-            )
-            save_df_to_sheet(df_all_sub, SUBJECTS_SHEET, SUBJECTS_COLS)
-            st.success("✅ تم إضافة المادة.")
-            st.rerun()
+            try:
+                append_record(SUBJECTS_SHEET, SUBJECTS_COLS, rec)
+                st.success("✅ تم إضافة المادة.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"خطأ أثناء إضافة المادة: {e}")
 
     st.markdown("### 📋 قائمة المواد في هذا الفرع")
     if df_sub.empty:
@@ -423,16 +425,19 @@ with tab2:
                 sub_ok = st.form_submit_button("💾 حفظ التعديلات")
 
             if sub_ok:
-                df_all_sub = load_subjects()
-                sid = row_edit["id"]
-                mask = df_all_sub["id"] == sid
-                df_all_sub.loc[mask, "nom_matiere"] = new_name.strip()
-                df_all_sub.loc[mask, "heures_totales"] = str(new_tot)
-                df_all_sub.loc[mask, "heures_semaine"] = str(new_week)
-                df_all_sub.loc[mask, "specialites"] = ",".join(new_specs)
-                save_df_to_sheet(df_all_sub, SUBJECTS_SHEET, SUBJECTS_COLS)
-                st.success("✅ تم تعديل المادة.")
-                st.rerun()
+                try:
+                    sid = row_edit["id"]
+                    updates = {
+                        "nom_matiere": new_name.strip(),
+                        "heures_totales": str(new_tot),
+                        "heures_semaine": str(new_week),
+                        "specialites": ",".join(new_specs),
+                    }
+                    update_record_fields_by_id(SUBJECTS_SHEET, SUBJECTS_COLS, sid, updates)
+                    st.success("✅ تم تعديل المادة.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"خطأ أثناء تعديل المادة: {e}")
 
         st.markdown("### 🗑️ حذف مادة")
         opts_del = [
@@ -445,9 +450,7 @@ with tab2:
                 try:
                     idxd = int(pick_del.split("]")[0].replace("[", "").strip())
                     sid = df_sub.iloc[idxd]["id"]
-                    df_all_sub = load_subjects()
-                    df_all_sub = df_all_sub[df_all_sub["id"] != sid]
-                    save_df_to_sheet(df_all_sub, SUBJECTS_SHEET, SUBJECTS_COLS)
+                    delete_record_by_id(SUBJECTS_SHEET, SUBJECTS_COLS, sid)
                     st.success("✅ تم الحذف.")
                     st.rerun()
                 except Exception as e:
@@ -524,51 +527,50 @@ with tab3:
                         "justifie": "Oui" if is_justified else "Non",
                         "commentaire": comment.strip(),
                     }
-                    df_abs_new = pd.concat(
-                        [df_abs_all, pd.DataFrame([rec])],
-                        ignore_index=True
-                    )
-                    save_df_to_sheet(df_abs_new, ABSENCES_SHEET, ABSENCES_COLS)
-                    st.success("✅ تم تسجيل الغياب.")
-
-                    # ---- تنبيه واتساب ----
-                    target = st.radio(
-                        "المرسل إليه",
-                        ["المتكوّن", "الولي"],
-                        horizontal=True,
-                        key="wa_target_new_abs"
-                    )
-                    phone_target = (
-                        row_tr["telephone"] if target == "المتكوّن" else row_tr["tel_parent"]
-                    )
-                    phone_target = normalize_phone(phone_target)
-                    if phone_target:
-                        # حساب مجموع الغيابات لهذا المتربّص في هذه المادة (غير المبررة فقط)
-                        df_abs_all2 = load_absences()
-                        mask_pair = (
-                            (df_abs_all2["trainee_id"] == row_tr["id"]) &
-                            (df_abs_all2["subject_id"] == row_sub["id"]) &
-                            (df_abs_all2["justifie"] != "Oui")
-                        )
-                        total_abs = df_abs_all2.loc[mask_pair, "heures_absence"].apply(as_float).sum()
-                        total_hours = as_float(row_sub["heures_totales"])
-                        ten_pct = total_hours * 0.10 if total_hours > 0 else 0
-                        msg = (
-                            f"السلام عليكم،\n\n"
-                            f"📌 المتكوّن: {row_tr['nom']}\n"
-                            f"📚 المادة: {row_sub['nom_matiere']}\n"
-                            f"📅 تاريخ الغياب: {abs_date.strftime('%Y-%m-%d')}\n"
-                            f"⏱ عدد ساعات الغياب اليوم: {h_abs}\n"
-                            f"🧮 مجموع ساعات الغياب غير المبررة في هذه المادة: {total_abs}\n"
-                        )
-                        if total_hours > 0:
-                            msg += f"🔢 الحد الأقصى (10٪ من {total_hours}h): {ten_pct}h\n"
-                        msg += "\nمع تحيات Mega Formation."
-
-                        link = wa_link(phone_target, msg)
-                        st.markdown(f"[📲 إرسال تنبيه واتساب]({link})")
+                    try:
+                        append_record(ABSENCES_SHEET, ABSENCES_COLS, rec)
+                        st.success("✅ تم تسجيل الغياب.")
+                    except Exception as e:
+                        st.error(f"خطأ أثناء تسجيل الغياب: {e}")
                     else:
-                        st.info("لم يتم ضبط رقم هاتف صحيح للتلميذ أو الولي.")
+                        # ---- تنبيه واتساب ----
+                        target = st.radio(
+                            "المرسل إليه",
+                            ["المتكوّن", "الولي"],
+                            horizontal=True,
+                            key="wa_target_new_abs"
+                        )
+                        phone_target = (
+                            row_tr["telephone"] if target == "المتكوّن" else row_tr["tel_parent"]
+                        )
+                        phone_target = normalize_phone(phone_target)
+                        if phone_target:
+                            # مجموع الغيابات غير المبررة لهذا المتربّص في هذه المادة
+                            df_abs_all2 = load_absences()
+                            mask_pair = (
+                                (df_abs_all2["trainee_id"] == row_tr["id"]) &
+                                (df_abs_all2["subject_id"] == row_sub["id"]) &
+                                (df_abs_all2["justifie"] != "Oui")
+                            )
+                            total_abs = df_abs_all2.loc[mask_pair, "heures_absence"].apply(as_float).sum()
+                            total_hours = as_float(row_sub["heures_totales"])
+                            ten_pct = total_hours * 0.10 if total_hours > 0 else 0
+                            msg = (
+                                f"السلام عليكم،\n\n"
+                                f"📌 المتكوّن: {row_tr['nom']}\n"
+                                f"📚 المادة: {row_sub['nom_matiere']}\n"
+                                f"📅 تاريخ الغياب: {abs_date.strftime('%Y-%m-%d')}\n"
+                                f"⏱ عدد ساعات الغياب اليوم: {h_abs}\n"
+                                f"🧮 مجموع ساعات الغياب غير المبررة في هذه المادة: {total_abs}\n"
+                            )
+                            if total_hours > 0:
+                                msg += f"🔢 الحد الأقصى (10٪ من {total_hours}h): {ten_pct}h\n"
+                            msg += "\nمع تحيات Mega Formation."
+
+                            link = wa_link(phone_target, msg)
+                            st.markdown(f"[📲 إرسال تنبيه واتساب]({link})")
+                        else:
+                            st.info("لم يتم ضبط رقم هاتف صحيح للتلميذ أو الولي.")
 
         st.markdown("---")
         st.markdown("### ✏️ تغيير حالة غياب (مثلاً بعد شهادة طبية)")
@@ -640,16 +642,19 @@ with tab3:
                         submit_edit_abs = st.form_submit_button("💾 حفظ التعديل")
 
                     if submit_edit_abs:
-                        df_all_abs = load_absences()
-                        aid = row_a["id_x"] if "id_x" in row_a else row_a["id"]
-                        mask_a = df_all_abs["id"] == aid
-                        df_all_abs.loc[mask_a, "date"] = new_date.strftime("%Y-%m-%d")
-                        df_all_abs.loc[mask_a, "heures_absence"] = str(new_hours)
-                        df_all_abs.loc[mask_a, "justifie"] = new_just
-                        df_all_abs.loc[mask_a, "commentaire"] = new_comment.strip()
-                        save_df_to_sheet(df_all_abs, ABSENCES_SHEET, ABSENCES_COLS)
-                        st.success("✅ تم تعديل الغياب.")
-                        st.rerun()
+                        try:
+                            aid = row_a["id_x"] if "id_x" in row_a else row_a["id"]
+                            updates = {
+                                "date": new_date.strftime("%Y-%m-%d"),
+                                "heures_absence": str(new_hours),
+                                "justifie": new_just,
+                                "commentaire": new_comment.strip(),
+                            }
+                            update_record_fields_by_id(ABSENCES_SHEET, ABSENCES_COLS, aid, updates)
+                            st.success("✅ تم تعديل الغياب.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"خطأ أثناء تعديل الغياب: {e}")
 
 # ----------------- تبويب 4: تنبيهات 10٪ -----------------
 with tab4:
@@ -686,7 +691,7 @@ with tab4:
             df_abs["heures_absence_f"] = df_abs["heures_absence"].apply(as_float)
             df_abs["heures_totales_f"] = df_abs["heures_totales"].apply(as_float)
 
-            # غير المبررة فقط
+            # أخذ غير المبررة فقط
             df_eff = df_abs[df_abs["justifie"] != "Oui"].copy()
 
             if df_eff.empty:
