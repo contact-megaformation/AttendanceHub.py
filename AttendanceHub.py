@@ -6,13 +6,13 @@ import time
 import uuid
 import urllib.parse
 from datetime import datetime, date
+import os
 
 import pandas as pd
 import streamlit as st
 import gspread
 import gspread.exceptions as gse
 from google.oauth2.service_account import Credentials
-import os
 
 # ================== إعداد الصفحة ==================
 st.set_page_config(page_title="AttendanceHub - Mega Formation", layout="wide")
@@ -42,7 +42,7 @@ def make_client_and_sheet_id():
         try:
             sa = st.secrets["gcp_service_account"]
 
-            # 👉 نحاول نفهم النوع:
+            # 👉 نفهم النوع
             if isinstance(sa, dict) or hasattr(sa, "keys"):
                 # case: [gcp_service_account] محطوط كـ table في secrets.toml
                 sa_info = dict(sa)
@@ -56,7 +56,7 @@ def make_client_and_sheet_id():
                         f"رسالة الغلط: {e}\n\n"
                         "🔧 يا إمّا:\n"
                         "1) تحط محتوى service_account.json كسطر JSON صحيح في secrets تحت المفتاح gcp_service_account\n"
-                        "2) ولا (المستحسن) تعملو table بالطريقة اللي شرحتها في الكود."
+                        "2) ولا (المستحسن) تعملو table بالطريقة الموصى بها."
                     )
                     st.stop()
             else:
@@ -80,38 +80,19 @@ def make_client_and_sheet_id():
             st.error(f"⚠️ خطأ في gcp_service_account داخل secrets: {e}")
             st.stop()
 
-    # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
     elif os.path.exists("service_account.json"):
+        # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
         try:
             creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPE)
             client = gspread.authorize(creds)
-            sheet_id = "PUT_YOUR_SHEET_ID_HERE"  # بدّلها لو تخدم لوكال
+            # بدّلها بـ ID الصحيح لو تخدم لوكال
+            sheet_id = "PUT_YOUR_SHEET_ID_HERE"
             return client, sheet_id
         except Exception as e:
             st.error(f"⚠️ خطأ في قراءة service_account.json: {e}")
             st.stop()
-
-    # 3) لا secrets لا ملف ⇒ نوقف ونفسّر
     else:
-        st.error(
-            "❌ لا وجدنا لا gcp_service_account في Streamlit secrets لا ملف service_account.json.\n\n"
-            "▶ في Streamlit Cloud: زيد gcp_service_account و SPREADSHEET_ID في صفحة secrets.\n"
-            "▶ لو تخدم لوكال: حط ملف service_account.json في نفس فولدر AttendanceHub_GSheets.py."
-        )
-        st.stop()
-    # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
-    elif os.path.exists("service_account.json"):
-        try:
-            creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPE)
-            client = gspread.authorize(creds)
-            sheet_id = "PUT_YOUR_SHEET_ID_HERE"  # بدّلها لو تخدم لوكال
-            return client, sheet_id
-        except Exception as e:
-            st.error(f"⚠️ خطأ في قراءة service_account.json: {e}")
-            st.stop()
-
-    # 3) لا secrets لا ملف ⇒ نوقف ونفسّر
-    else:
+        # 3) لا secrets لا ملف ⇒ نوقف ونفسّر
         st.error(
             "❌ لا وجدنا لا gcp_service_account في Streamlit secrets لا ملف service_account.json.\n\n"
             "▶ في Streamlit Cloud: زيد gcp_service_account و SPREADSHEET_ID في صفحة secrets.\n"
@@ -660,8 +641,7 @@ with tab3:
 
                     if submit_edit_abs:
                         df_all_abs = load_absences()
-                        # بعد الدمج، id متاع absences يبقى في عمود "id"
-                        aid = row_a["id"]
+                        aid = row_a["id_x"] if "id_x" in row_a else row_a["id"]
                         mask_a = df_all_abs["id"] == aid
                         df_all_abs.loc[mask_a, "date"] = new_date.strftime("%Y-%m-%d")
                         df_all_abs.loc[mask_a, "heures_absence"] = str(new_hours)
@@ -706,7 +686,7 @@ with tab4:
             df_abs["heures_absence_f"] = df_abs["heures_absence"].apply(as_float)
             df_abs["heures_totales_f"] = df_abs["heures_totales"].apply(as_float)
 
-            # أخذ غير المبررة فقط
+            # غير المبررة فقط
             df_eff = df_abs[df_abs["justifie"] != "Oui"].copy()
 
             if df_eff.empty:
@@ -757,4 +737,3 @@ with tab4:
                         }),
                         use_container_width=True
                     )
-
