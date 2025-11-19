@@ -473,104 +473,116 @@ with tab3:
     elif df_sub_b.empty:
         st.info("لا توجد مواد مضبوطة في هذا الفرع.")
     else:
-        # ---- إضافة غياب جديد ----
-        st.markdown("### ➕ إضافة غياب")
+        # 🔎 فلترة المتكوّنين حسب التخصّص
+        specs_in_branch = sorted([s for s in df_tr_b["specialite"].dropna().unique() if s])
+        spec_choice = st.selectbox(
+            "🔧 اختر التخصّص (لإظهار المتكوّنين)",
+            ["(الكل)"] + specs_in_branch
+        )
+        if spec_choice != "(الكل)":
+            df_tr_b = df_tr_b[df_tr_b["specialite"] == spec_choice].copy()
 
-        options_tr = [
-            f"[{i}] {r['nom']} — {r['specialite']} ({r['telephone']})"
-            for i, (_, r) in enumerate(df_tr_b.iterrows())
-        ]
-        tr_pick = st.selectbox("اختر المتكوّن", options_tr)
-        idx_tr = int(tr_pick.split("]")[0].replace("[", "").strip())
-        row_tr = df_tr_b.iloc[idx_tr]
-
-        # المواد المربوطة بتخصّص المتربص
-        spec_tr = str(row_tr["specialite"])
-        df_sub_for_tr = df_sub_b[
-            df_sub_b["specialites"].fillna("").str.contains(spec_tr)
-        ].copy()
-
-        if df_sub_for_tr.empty:
-            st.warning("لا توجد مواد مربوطة بهذا التخصّص. اضبط المواد في تبويب المواد.")
+        if df_tr_b.empty:
+            st.info("لا يوجد متكوّنون بهذا التخصّص في هذا الفرع.")
         else:
-            opts_sub = [
-                f"[{i}] {r['nom_matiere']} ({r['heures_totales']}h)"
-                for i, (_, r) in enumerate(df_sub_for_tr.iterrows())
+            # ---- إضافة غياب جديد ----
+            st.markdown("### ➕ إضافة غياب")
+
+            options_tr = [
+                f"[{i}] {r['nom']} — {r['specialite']} ({r['telephone']})"
+                for i, (_, r) in enumerate(df_tr_b.iterrows())
             ]
-            sub_pick = st.selectbox("اختر المادة", opts_sub)
-            idx_sub = int(sub_pick.split("]")[0].replace("[", "").strip())
-            row_sub = df_sub_for_tr.iloc[idx_sub]
+            tr_pick = st.selectbox("اختر المتكوّن", options_tr)
+            idx_tr = int(tr_pick.split("]")[0].replace("[", "").strip())
+            row_tr = df_tr_b.iloc[idx_tr]
 
-            with st.form("add_abs_form"):
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    abs_date = st.date_input("تاريخ الغياب", value=date.today())
-                with col2:
-                    h_abs = st.number_input("عدد ساعات الغياب", min_value=0.0, step=0.5)
-                with col3:
-                    is_justified = st.checkbox("غياب مبرر (شهادة طبية؟)", value=False)
+            # المواد المربوطة بتخصّص المتربص
+            spec_tr = str(row_tr["specialite"])
+            df_sub_for_tr = df_sub_b[
+                df_sub_b["specialites"].fillna("").str.contains(spec_tr)
+            ].copy()
 
-                comment = st.text_area("ملاحظة (اختياري)")
-                submit_abs = st.form_submit_button("📥 حفظ الغياب")
+            if df_sub_for_tr.empty:
+                st.warning("لا توجد مواد مربوطة بهذا التخصّص. اضبط المواد في تبويب المواد.")
+            else:
+                opts_sub = [
+                    f"[{i}] {r['nom_matiere']} ({r['heures_totales']}h)"
+                    for i, (_, r) in enumerate(df_sub_for_tr.iterrows())
+                ]
+                sub_pick = st.selectbox("اختر المادة", opts_sub)
+                idx_sub = int(sub_pick.split("]")[0].replace("[", "").strip())
+                row_sub = df_sub_for_tr.iloc[idx_sub]
 
-            if submit_abs:
-                if h_abs <= 0:
-                    st.error("❌ عدد ساعات الغياب يجب أن يكون > 0.")
-                else:
-                    new_id = uuid.uuid4().hex[:10]
-                    rec = {
-                        "id": new_id,
-                        "trainee_id": row_tr["id"],
-                        "subject_id": row_sub["id"],
-                        "date": abs_date.strftime("%Y-%m-%d"),
-                        "heures_absence": str(h_abs),
-                        "justifie": "Oui" if is_justified else "Non",
-                        "commentaire": comment.strip(),
-                    }
-                    try:
-                        append_record(ABSENCES_SHEET, ABSENCES_COLS, rec)
-                        st.success("✅ تم تسجيل الغياب.")
-                    except Exception as e:
-                        st.error(f"خطأ أثناء تسجيل الغياب: {e}")
+                with st.form("add_abs_form"):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        abs_date = st.date_input("تاريخ الغياب", value=date.today())
+                    with col2:
+                        h_abs = st.number_input("عدد ساعات الغياب", min_value=0.0, step=0.5)
+                    with col3:
+                        is_justified = st.checkbox("غياب مبرر (شهادة طبية؟)", value=False)
+
+                    comment = st.text_area("ملاحظة (اختياري)")
+                    submit_abs = st.form_submit_button("📥 حفظ الغياب")
+
+                if submit_abs:
+                    if h_abs <= 0:
+                        st.error("❌ عدد ساعات الغياب يجب أن يكون > 0.")
                     else:
-                        # ---- تنبيه واتساب ----
-                        target = st.radio(
-                            "المرسل إليه",
-                            ["المتكوّن", "الولي"],
-                            horizontal=True,
-                            key="wa_target_new_abs"
-                        )
-                        phone_target = (
-                            row_tr["telephone"] if target == "المتكوّن" else row_tr["tel_parent"]
-                        )
-                        phone_target = normalize_phone(phone_target)
-                        if phone_target:
-                            # مجموع الغيابات غير المبررة لهذا المتربّص في هذه المادة
-                            df_abs_all2 = load_absences()
-                            mask_pair = (
-                                (df_abs_all2["trainee_id"] == row_tr["id"]) &
-                                (df_abs_all2["subject_id"] == row_sub["id"]) &
-                                (df_abs_all2["justifie"] != "Oui")
-                            )
-                            total_abs = df_abs_all2.loc[mask_pair, "heures_absence"].apply(as_float).sum()
-                            total_hours = as_float(row_sub["heures_totales"])
-                            ten_pct = total_hours * 0.10 if total_hours > 0 else 0
-                            msg = (
-                                f"السلام عليكم،\n\n"
-                                f"📌 المتكوّن: {row_tr['nom']}\n"
-                                f"📚 المادة: {row_sub['nom_matiere']}\n"
-                                f"📅 تاريخ الغياب: {abs_date.strftime('%Y-%m-%d')}\n"
-                                f"⏱ عدد ساعات الغياب اليوم: {h_abs}\n"
-                                f"🧮 مجموع ساعات الغياب غير المبررة في هذه المادة: {total_abs}\n"
-                            )
-                            if total_hours > 0:
-                                msg += f"🔢 الحد الأقصى (10٪ من {total_hours}h): {ten_pct}h\n"
-                            msg += "\nمع تحيات Mega Formation."
-
-                            link = wa_link(phone_target, msg)
-                            st.markdown(f"[📲 إرسال تنبيه واتساب]({link})")
+                        new_id = uuid.uuid4().hex[:10]
+                        rec = {
+                            "id": new_id,
+                            "trainee_id": row_tr["id"],
+                            "subject_id": row_sub["id"],
+                            "date": abs_date.strftime("%Y-%m-%d"),
+                            "heures_absence": str(h_abs),
+                            "justifie": "Oui" if is_justified else "Non",
+                            "commentaire": comment.strip(),
+                        }
+                        try:
+                            append_record(ABSENCES_SHEET, ABSENCES_COLS, rec)
+                            st.success("✅ تم تسجيل الغياب.")
+                        except Exception as e:
+                            st.error(f"خطأ أثناء تسجيل الغياب: {e}")
                         else:
-                            st.info("لم يتم ضبط رقم هاتف صحيح للتلميذ أو الولي.")
+                            # ---- تنبيه واتساب ----
+                            target = st.radio(
+                                "المرسل إليه",
+                                ["المتكوّن", "الولي"],
+                                horizontal=True,
+                                key="wa_target_new_abs"
+                            )
+                            phone_target = (
+                                row_tr["telephone"] if target == "المتكوّن" else row_tr["tel_parent"]
+                            )
+                            phone_target = normalize_phone(phone_target)
+                            if phone_target:
+                                # مجموع الغيابات غير المبررة لهذا المتربّص في هذه المادة
+                                df_abs_all2 = load_absences()
+                                mask_pair = (
+                                    (df_abs_all2["trainee_id"] == row_tr["id"]) &
+                                    (df_abs_all2["subject_id"] == row_sub["id"]) &
+                                    (df_abs_all2["justifie"] != "Oui")
+                                )
+                                total_abs = df_abs_all2.loc[mask_pair, "heures_absence"].apply(as_float).sum()
+                                total_hours = as_float(row_sub["heures_totales"])
+                                ten_pct = total_hours * 0.10 if total_hours > 0 else 0
+                                msg = (
+                                    f"السلام عليكم،\n\n"
+                                    f"📌 المتكوّن: {row_tr['nom']}\n"
+                                    f"📚 المادة: {row_sub['nom_matiere']}\n"
+                                    f"📅 تاريخ الغياب: {abs_date.strftime('%Y-%m-%d')}\n"
+                                    f"⏱ عدد ساعات الغياب اليوم: {h_abs}\n"
+                                    f"🧮 مجموع ساعات الغياب غير المبررة في هذه المادة: {total_abs}\n"
+                                )
+                                if total_hours > 0:
+                                    msg += f"🔢 الحد الأقصى (10٪ من {total_hours}h): {ten_pct}h\n"
+                                msg += "\nمع تحيات Mega Formation."
+
+                                link = wa_link(phone_target, msg)
+                                st.markdown(f"[📲 إرسال تنبيه واتساب]({link})")
+                            else:
+                                st.info("لم يتم ضبط رقم هاتف صحيح للتلميذ أو الولي.")
 
         st.markdown("---")
         st.markdown("### ✏️ تغيير حالة غياب (مثلاً بعد شهادة طبية)")
