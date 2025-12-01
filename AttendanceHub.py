@@ -5,7 +5,7 @@ import json
 import time
 import uuid
 import urllib.parse
-from datetime import datetime, date
+from datetime import datetime, date, timedelta  # ⬅️ زدت timedelta
 
 import pandas as pd
 import streamlit as st
@@ -702,8 +702,9 @@ with tab4:
         else:
             df_abs["heures_absence_f"] = df_abs["heures_absence"].apply(as_float)
             df_abs["heures_totales_f"] = df_abs["heures_totales"].apply(as_float)
+            df_abs = df_abs.rename(columns={"specialite": "spec", "nom_matiere": "matiere"})
 
-            # أخذ غير المبررة فقط
+            # أخذ غير المبررة فقط للتنبيه 10%
             df_eff = df_abs[df_abs["justifie"] != "Oui"].copy()
 
             if df_eff.empty:
@@ -720,8 +721,8 @@ with tab4:
                 grp = df_eff.groupby(["trainee_id", "subject_id"], as_index=False).agg(
                     total_abs=("heures_absence_f", "sum"),
                     nom=("nom", "first"),
-                    matiere=("nom_matiere", "first"),
-                    spec=("specialite", "first"),
+                    matiere=("matiere", "first"),
+                    spec=("spec", "first"),
                     heures_tot=("heures_totales_f", "first"),
                 )
 
@@ -754,3 +755,128 @@ with tab4:
                         }),
                         use_container_width=True
                     )
+
+            # =============== 📲 إرسال ملخّص غيابات عبر WhatsApp ===============
+            st.markdown("---")
+            st.markdown("### 📲 إرسال ملخّص غيابات حسب فترة (يوم / أسبوع / شهر)")
+
+            # تجهيز تاريخ كـ date object للفلاترة
+            df_abs["date_dt"] = pd.to_datetime(df_abs["date"], errors="coerce").dt.date
+
+            # قائمة المتكوّنين اللي عندهم غيابات في هذا الفرع
+            trainees_with_abs = df_abs[["trainee_id", "nom", "spec"]].drop_duplicates().reset_index(drop=True)
+
+            if trainees_with_abs.empty:
+                st.info("ما فماش متكوّنين عندهم غيابات في هذا الفرع.")
+            else:
+                options_wa = [
+                    f"[{i}] {r['nom']} — {r['spec']}"
+                    for i, (_, r) in enumerate(trainees_with_abs.iterrows())
+                ]
+                pick_wa = st.selectbox("اختر المتكوّن", options_wa, key="wa_summary_trainee")
+                idx_sel = int(pick_wa.split("]")[0].replace("[", "").strip())
+                row_sel = trainees_with_abs.iloc[idx_sel]
+                tr_id = row_sel["trainee_id"]
+
+                # نلقى معلوماته الكاملة (من متكوّنين)
+                tr_info = df_tr_b[df_tr_b["id"] == tr_id].copy()
+                if tr_info.empty:
+                    st.warning("تعذّر إيجاد بيانات المتكوّن في جدول المتكوّنين.")
+                else:
+                    tr_info = tr_info.iloc[0]
+
+                    period_type = st.radio(
+                        "اختر نوع الفترة",
+                        ["يوم محدد", "أسبوع محدد", "شهر كامل"],
+                        horizontal=True,
+                        key="wa_period_type"
+                    )
+
+                    today = date.today()
+
+                    if period_type == "يوم محدد":
+                        day_val = st.date_input("اليوم المطلوب", value=today, key="wa_day")
+                        start_date = day_val
+                        end_date = day_val
+                        period_label = f"يوم {day_val.strftime('%Y-%m-%d')}"
+                    elif period_type == "أسبوع محدد":
+                        col_w1, col_w2 = st.columns(2)
+                        with col_w1:
+                            week_start = st.date_input("من تاريخ", value=today - timedelta(days=7), key="wa_week_start")
+                        with col_w2:
+                            week_end = st.date_input("إلى تاريخ", value=today, key="wa_week_end")
+                        if week_end < week_start:
+                            st.warning("⚠️ تاريخ النهاية أصغر من البداية، سيتم التبديل تلقائيًا.")
+                            week_start, week_end = week_end, week_start
+                        start_date, end_date = week_start, week_end
+                        period_label = f"من {start_date.strftime('%Y-%m-%d')} إلى {end_date.strftime('%Y-%m-%d')}"
+                    else:  # شهر كامل
+                        month_ref = st.date_input(
+                            "اختر أي يوم من الشهر المطلوب",
+                            value=today,
+                            key="wa_month_ref"
+                        )
+                        start_date = month_ref.replace(day=1)
+                        if month_ref.month == 12:
+                            next_month = date(month_ref.year + 1, 1, 1)
+                        else:
+                            next_month = date(month_ref.year, month_ref.month + 1, 1)
+                        end_date = next_month - timedelta(days=1)
+                        period_label = f"شهر {start_date.strftime('%Y-%m')}"
+
+                    # فلترة الغيابات حسب المتكوّن + الفترة
+                    mask_tr = df_abs["trainee_id"] == tr_id
+                    mask_date = (df_abs["date_dt"] >= start_date) & (df_abs["date_dt"] <= end_date)
+                    df_period = df_abs[mask_tr & mask_date].copy()
+
+                    if df_period.empty:
+                        st.info("لا توجد غيابات لهذا المتكوّن في الفترة المختارة.")
+                    else:
+                        df_period = df_period.sort_values("date_dt")
+
+                        total_all = df_period["heures_absence_f"].apply(as_float).sum()
+                        total_unjust = df_period[df_period["justifie"] != "Oui"]["heures_absence_f"].apply(as_float).sum()
+
+                        # بناء المساج
+                        msg_lines = []
+                        msg_lines.append("السلام عليكم،\n")
+                        msg_lines.append("هذا ملخّص الغيابات:\n\n")
+                        msg_lines.append(f"📌 المتكوّن: {tr_info['nom']}\n")
+                        msg_lines.append(f"🔧 التخصّص: {tr_info['specialite']}\n")
+                        msg_lines.append(f"📅 الفترة: {period_label}\n\n")
+                        msg_lines.append("📋 تفاصيل الغيابات:\n")
+
+                        for _, r in df_period.iterrows():
+                            dstr = r["date_dt"].strftime("%Y-%m-%d") if isinstance(r["date_dt"], date) else str(r["date"])
+                            mat = r["matiere"]
+                            hrs = as_float(r["heures_absence_f"])
+                            just = "مبرّرة" if str(r["justifie"]) == "Oui" else "غير مبرّرة"
+                            msg_lines.append(f"- {dstr} — {mat} — {hrs}h — {just}\n")
+
+                        msg_lines.append("\n🧮 المجموع الكلّي للساعات: "
+                                         f"{round(total_all,2)}h\n")
+                        msg_lines.append(f"❗ مجموع الساعات غير المبرّرة: "
+                                         f"{round(total_unjust,2)}h\n")
+                        msg_lines.append("\nمع تحيات Mega Formation.")
+
+                        full_msg = "".join(msg_lines)
+
+                        st.markdown("#### نصّ الرسالة المقترحة:")
+                        st.text_area("يمكنك تعديله قبل الإرسال:", value=full_msg, height=250, key="wa_msg_preview")
+
+                        target2 = st.radio(
+                            "ترسل لمين؟",
+                            ["المتكوّن", "الولي"],
+                            horizontal=True,
+                            key="wa_target_summary"
+                        )
+                        phone_target2 = tr_info["telephone"] if target2 == "المتكوّن" else tr_info["tel_parent"]
+                        phone_target2 = normalize_phone(phone_target2)
+
+                        if not phone_target2:
+                            st.warning("⚠️ ما فماش رقم هاتف مضبوط للطرف المختار.")
+                        else:
+                            # نأخذ آخر نسخة من التكسط اِلّي في textarea (ممكن المستخدم عدّلها)
+                            final_msg = st.session_state.get("wa_msg_preview", full_msg)
+                            link2 = wa_link(phone_target2, final_msg)
+                            st.markdown(f"[📲 فتح WhatsApp وإرسال الملخّص]({link2})")
