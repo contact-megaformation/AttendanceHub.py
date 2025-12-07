@@ -236,7 +236,8 @@ def build_whatsapp_message_for_trainee(
     tr_row, df_abs_all, df_sub_all, branch_name, d_from: date, d_to: date, period_label: str
 ) -> tuple[str, list[str]]:
     """
-    ترجع (message_text, info_lines)  — info_lines لو تحب تعرضها في الواجهة.
+    ترجع (message_text, info_lines)  — info_lines فقط لمعلومة تقنية في الواجهة.
+    الرسالة منظّمة وبلا أرقام 10٪ (نستعملهم فقط داخليًا لمعرفة المواد الخطِرة).
     """
     trainee_id = tr_row["id"]
     df_abs_t = df_abs_all[df_abs_all["trainee_id"] == trainee_id].copy()
@@ -244,6 +245,7 @@ def build_whatsapp_message_for_trainee(
     if df_abs_t.empty:
         return "", ["لا توجد غيابات لهذا المتكوّن في أي فترة."]
 
+    # فلترة حسب الفترة
     df_abs_t["date_dt"] = pd.to_datetime(df_abs_t["date"], errors="coerce")
     mask_period = (df_abs_t["date_dt"].dt.date >= d_from) & (
         df_abs_t["date_dt"].dt.date <= d_to
@@ -253,6 +255,7 @@ def build_whatsapp_message_for_trainee(
     if df_abs_period.empty:
         return "", ["لا توجد غيابات في هذه الفترة."]
 
+    # إلحاق أسماء المواد وعدد الساعات الإجمالية
     df_abs_period = df_abs_period.merge(
         df_sub_all[["id", "nom_matiere", "heures_totales"]],
         left_on="subject_id",
@@ -261,74 +264,69 @@ def build_whatsapp_message_for_trainee(
         suffixes=("", "_sub"),
     )
 
-    lines = []
+    # تفاصيل الغيابات سطر بسطر
+    detail_lines = []
     for _, r in df_abs_period.iterrows():
         if pd.notna(r["date_dt"]):
             dstr = r["date_dt"].strftime("%Y-%m-%d")
         else:
             dstr = str(r["date"])
-        subj = str(r.get("nom_matiere", ""))
+        subj = str(r.get("nom_matiere", "") or "").strip()
         h = as_float(r.get("heures_absence", 0))
         just = "مبرر" if str(r.get("justifie", "")).strip() == "Oui" else "غير مبرر"
-        lines.append(f"- {dstr} | {subj} | {h}h ({just})")
+        detail_lines.append(f"- {dstr} | {subj} | {h:.2f} ساعة ({just})")
 
-    # غيابات غير مبررة فقط لحساب 10٪
+    # نحسب الغيابات غير المبررة فقط داخليًا لمعرفة المواد اللي عندو فيها مشكل
     df_eff_t = df_abs_period[df_abs_period["justifie"] != "Oui"].copy()
     df_eff_t["heures_absence_f"] = df_eff_t["heures_absence"].apply(as_float)
     df_eff_t["heures_totales_f"] = df_eff_t["heures_totales"].apply(as_float)
 
     elim_lines = []
-    stats_lines = []
-
     if not df_eff_t.empty:
         grp_t = df_eff_t.groupby("nom_matiere", as_index=False).agg(
             total_abs=("heures_absence_f", "sum"),
             heures_tot=("heures_totales_f", "first"),
         )
+        # استعمال 10% داخلي فقط لمعرفة المواد الخطرة، بلا ما نذكرها في الرسالة
         grp_t["limit_10"] = grp_t["heures_tot"] * 0.10
-        grp_t["remaining"] = grp_t["limit_10"] - grp_t["total_abs"]
-
-        for _, g in grp_t.iterrows():
-            stats_lines.append(
-                f"- {g['nom_matiere']}: مجموع غياب غير مبرر {g['total_abs']:.2f}h / حد 10٪ = {g['limit_10']:.2f}h (الباقي قبل 10٪ = {g['remaining']:.2f}h)"
-            )
         elim = grp_t[grp_t["total_abs"] >= grp_t["limit_10"]]
-        for _, g in elim.iterrows():
-            elim_lines.append(
-                f"- {g['nom_matiere']} (مجموع غياب غير مبرر {g['total_abs']:.2f}h ≥ حد 10٪ {g['limit_10']:.2f}h)"
-            )
 
+        for _, g in elim.iterrows():
+            mat_name = str(g["nom_matiere"]).strip()
+            elim_lines.append(f"- {mat_name}")
+
+    # ===== بناء الرسالة مرتبة =====
     msg_lines = []
-    msg_lines.append("مرحبا بيك، إدارة هيكل التكوين تعلمك أنو:")
+
+    msg_lines.append("السلام عليكم،")
+    msg_lines.append(
+        "إدارة هيكل التكوين تحب تعلمك بتفاصيل الغيابات اللي تمّ تسجيلها في الفترة المحدّدة:"
+    )
     msg_lines.append("")
-    msg_lines.append(f"📌 المتكوّن: {tr_row['nom']}")
+    msg_lines.append(f"👤 المتكوّن: {tr_row.get('nom', '')}")
     msg_lines.append(f"🏫 الفرع: {branch_name}")
     msg_lines.append(f"🔧 التخصّص: {tr_row.get('specialite', '')}")
     msg_lines.append(f"🕒 الفترة: {period_label}")
     msg_lines.append("")
-
-    msg_lines.append("تفاصيل الغيابات المسجّلة في هذه الفترة:")
-    msg_lines.extend(lines)
-
-    if stats_lines:
-        msg_lines.append("")
-        msg_lines.append("إحصائيات 10٪ للمواد (غيابات غير مبررة فقط):")
-        msg_lines.extend(stats_lines)
+    msg_lines.append("📋 تفاصيل الغيابات في هذه الفترة:")
+    msg_lines.extend(detail_lines)
 
     if elim_lines:
         msg_lines.append("")
         msg_lines.append(
-            "⚠️ المواد اللي تنجم تطيح فيهم élimination (تجاوز 10٪ غيابات غير مبررة):"
+            "⚠️ تنبيه: عندك غيابات مرتفعة في بعض المواد التالية، يلزمك تنتبه باش ما توصلش لمرحلة الإقصاء:"
         )
         msg_lines.extend(elim_lines)
 
     msg_lines.append("")
-    msg_lines.append("شكراً لتفهمك، ومرحبا بيك في أي وقت في إدارة هيكل التكوين.")
+    msg_lines.append("🙏 نشكروك على تفهّمك، ومرحبا بيك في الإدارة لأي استفسار.")
 
     msg = "\n".join(msg_lines)
+
+    # info_debug فقط للاستئناس في الواجهة
     info_debug = [
-        f"Found {len(df_abs_period)} absences in this period.",
-        f"Unjustified rows used for 10% calc: {len(df_eff_t)}",
+        f"غيابات في الفترة: {len(df_abs_period)}",
+        f"غيابات غير مبررة محسوبة داخليًا: {len(df_eff_t)}",
     ]
     return msg, info_debug
 
@@ -1192,7 +1190,7 @@ with tab4:
             df_tr_batch = df_tr_batch[df_tr_batch["specialite"] == spec_batch]
 
         if df_tr_batch.empty:
-            st.info("لا يوجد متكوّنون لهذا الشرط.")
+            st.info("لا يوجد متكوّنين لهذا الشرط.")
         else:
             st.markdown("#### 🕒 اختر الفترة المشتركة")
             period_type_b = st.radio(
@@ -1278,7 +1276,7 @@ with tab4:
                     )
                 if not rows_out:
                     st.info(
-                        "لا يوجد متكوّنون لديهم غيابات في هذه الفترة حسب الشروط."
+                        "لا يوجد متكوّنين لديهم غيابات في هذه الفترة حسب الشروط."
                     )
                 else:
                     df_links = pd.DataFrame(rows_out)
