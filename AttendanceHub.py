@@ -30,7 +30,7 @@ st.markdown(
 )
 
 # ================== إعداد Google Sheets ==================
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPE = ["https://www.googleapis.com/auth/spreadssheets"]
 
 
 def make_client_and_sheet_id():
@@ -237,7 +237,9 @@ def build_whatsapp_message_for_trainee(
 ) -> tuple[str, list[str]]:
     """
     ترجع (message_text, info_lines)  — info_lines فقط لمعلومة تقنية في الواجهة.
-    الرسالة منظّمة وبلا أرقام 10٪ (نستعملهم فقط داخليًا لمعرفة المواد الخطِرة).
+    الرسالة فيها:
+    - تفاصيل الغيابات سطر بسطر
+    - ملخص لكل مادة: مجموع الغياب غير المبرر + الباقي قبل الإقصاء (10٪)
     """
     trainee_id = tr_row["id"]
     df_abs_t = df_abs_all[df_abs_all["trainee_id"] == trainee_id].copy()
@@ -276,24 +278,39 @@ def build_whatsapp_message_for_trainee(
         just = "مبرر" if str(r.get("justifie", "")).strip() == "Oui" else "غير مبرر"
         detail_lines.append(f"- {dstr} | {subj} | {h:.2f} ساعة ({just})")
 
-    # نحسب الغيابات غير المبررة فقط داخليًا لمعرفة المواد اللي عندو فيها مشكل
+    # نحسب الغيابات غير المبررة فقط لموضوع 10٪
     df_eff_t = df_abs_period[df_abs_period["justifie"] != "Oui"].copy()
     df_eff_t["heures_absence_f"] = df_eff_t["heures_absence"].apply(as_float)
     df_eff_t["heures_totales_f"] = df_eff_t["heures_totales"].apply(as_float)
 
+    stats_lines = []
     elim_lines = []
+
     if not df_eff_t.empty:
         grp_t = df_eff_t.groupby("nom_matiere", as_index=False).agg(
             total_abs=("heures_absence_f", "sum"),
             heures_tot=("heures_totales_f", "first"),
         )
-        # استعمال 10% داخلي فقط لمعرفة المواد الخطرة، بلا ما نذكرها في الرسالة
         grp_t["limit_10"] = grp_t["heures_tot"] * 0.10
-        elim = grp_t[grp_t["total_abs"] >= grp_t["limit_10"]]
+        grp_t["remaining"] = grp_t["limit_10"] - grp_t["total_abs"]
 
-        for _, g in elim.iterrows():
+        for _, g in grp_t.iterrows():
             mat_name = str(g["nom_matiere"]).strip()
-            elim_lines.append(f"- {mat_name}")
+            total_abs = g["total_abs"]
+            remaining = g["remaining"]
+
+            # الشكل المطلوب:
+            # Organisation De L'Administration Douanière:
+            # • مجموع الغياب غير المبرر: 1.50 ساعة
+            # • الباقي قبل الإقصاء (10٪): 6.90 ساعة من مجموع الساعات الجملية
+            stats_lines.append(
+                f"- {mat_name}:\n"
+                f"   • مجموع الغياب غير المبرر: {total_abs:.2f} ساعة\n"
+                f"   • الباقي قبل الإقصاء (10٪): {remaining:.2f} ساعة من مجموع الساعات الجملية"
+            )
+
+            if remaining <= 0:
+                elim_lines.append(f"- {mat_name}")
 
     # ===== بناء الرسالة مرتبة =====
     msg_lines = []
@@ -311,10 +328,17 @@ def build_whatsapp_message_for_trainee(
     msg_lines.append("📋 تفاصيل الغيابات في هذه الفترة:")
     msg_lines.extend(detail_lines)
 
+    # ملخّص 10٪ (مجموع غير مبرر + الباقي قبل الإقصاء)
+    if stats_lines:
+        msg_lines.append("")
+        msg_lines.append("📊 ملخّص الغيابات غير المبررة حسب المواد:")
+        msg_lines.extend(stats_lines)
+
+    # المواد اللي تعدّت 10٪ (إقصاء محتمل)
     if elim_lines:
         msg_lines.append("")
         msg_lines.append(
-            "⚠️ تنبيه: عندك غيابات مرتفعة في بعض المواد التالية، يلزمك تنتبه باش ما توصلش لمرحلة الإقصاء:"
+            "⚠️ تنبيه: في بعض المواد تمّ تجاوز الحد الأقصى للغيابات ويمكن يترتّب عليه الإقصاء:"
         )
         msg_lines.extend(elim_lines)
 
@@ -323,10 +347,9 @@ def build_whatsapp_message_for_trainee(
 
     msg = "\n".join(msg_lines)
 
-    # info_debug فقط للاستئناس في الواجهة
     info_debug = [
         f"غيابات في الفترة: {len(df_abs_period)}",
-        f"غيابات غير مبررة محسوبة داخليًا: {len(df_eff_t)}",
+        f"غيابات غير مبررة محسوبة لــ10٪: {len(df_eff_t)}",
     ]
     return msg, info_debug
 
@@ -1190,7 +1213,7 @@ with tab4:
             df_tr_batch = df_tr_batch[df_tr_batch["specialite"] == spec_batch]
 
         if df_tr_batch.empty:
-            st.info("لا يوجد متكوّنين لهذا الشرط.")
+            st.info("لا يوجد متكوّنون لهذا الشرط.")
         else:
             st.markdown("#### 🕒 اختر الفترة المشتركة")
             period_type_b = st.radio(
@@ -1279,13 +1302,31 @@ with tab4:
                         "لا يوجد متكوّنين لديهم غيابات في هذه الفترة حسب الشروط."
                     )
                 else:
-                    df_links = pd.DataFrame(rows_out)
-                    st.dataframe(
-                        df_links[
-                            ["المتكوّن", "التخصّص", "الهاتف", "رابط الواتساب"]
-                        ],
-                        use_container_width=True,
-                    )
-                    st.caption(
-                        "إضغط على كل رابط لفتح رسالة واتساب في نافذة جديدة."
-                    )
+                    st.markdown("#### قائمة روابط الواتساب الجاهزة")
+                    st.caption("إضغط على الزر قدّام كل متكوّن لفتح المحادثة في نافذة جديدة.")
+
+                    for i, row in enumerate(rows_out, start=1):
+                        st.markdown(
+                            f"""
+                            <div style="margin-bottom:10px; padding:8px; border:1px solid #eee; border-radius:6px;">
+                              <b>{i}. {row['المتكوّن']}</b><br/>
+                              التخصّص: {row.get('التخصّص','')}<br/>
+                              الهاتف: {row['الهاتف']}<br/>
+                              <a href="{row['رابط الواتساب']}" target="_blank"
+                                 style="
+                                    display:inline-block;
+                                    margin-top:6px;
+                                    padding:6px 14px;
+                                    background-color:#25D366;
+                                    color:white;
+                                    text-decoration:none;
+                                    border-radius:6px;
+                                    font-weight:600;
+                                    font-size:14px;
+                                 ">
+                                 📲 فتح واتساب
+                              </a>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
