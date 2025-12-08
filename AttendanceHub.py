@@ -1,6 +1,7 @@
 # AttendanceHub_GSheets.py
 # إدارة الغيابات للمكوّنين + Google Sheets backend (فرع MB/Bizerte)
 # تنبيهات 10٪ + واتساب (فردي/جماعي) + حذف جماعي + Import من Excel/CSV
+# + سجل الإشعارات (Notifications_Log)
 
 import json
 import time
@@ -30,7 +31,7 @@ st.markdown(
 )
 
 # ================== إعداد Google Sheets ==================
-SCOPE = ["https://www.googleapis.com/auth/spreadssheets"]
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def make_client_and_sheet_id():
@@ -83,6 +84,7 @@ client, SPREADSHEET_ID = make_client_and_sheet_id()
 TRAINEES_SHEET = "Trainees"
 SUBJECTS_SHEET = "Subjects"
 ABSENCES_SHEET = "Absences"
+NOTIF_LOG_SHEET = "Notifications_Log"
 
 TRAINEES_COLS = [
     "id",
@@ -114,6 +116,18 @@ ABSENCES_COLS = [
     "commentaire",
 ]
 
+NOTIF_LOG_COLS = [
+    "id",
+    "trainee_id",
+    "phone",
+    "target",       # Trainee / Parent
+    "branche",
+    "period_from",
+    "period_to",
+    "period_label",
+    "sent_at_iso",  # تاريخ ووقت الإرسال (UTC ISO)
+]
+
 # ============= Utils Sheets =============
 
 
@@ -129,7 +143,7 @@ def get_spreadsheet():
             return sh
         except gse.APIError as e:
             last_err = e
-            time.sleep(0.5 * (2 ** i))
+            time.sleep(0.5 * (2**i))
     st.error("❌ فشل في فتح Google Sheet (ممكن الكوتا تعدّت).")
     raise last_err
 
@@ -197,6 +211,32 @@ def update_record_fields_by_id(
     st.cache_data.clear()
 
 
+def append_notification_log(
+    trainee_id: str,
+    phone: str,
+    target: str,
+    branche: str,
+    period_from: date,
+    period_to: date,
+    period_label: str,
+):
+    """
+    تسجيل إرسال إشعار واتساب في شيت Notifications_Log
+    """
+    rec = {
+        "id": uuid.uuid4().hex[:12],
+        "trainee_id": trainee_id,
+        "phone": phone,
+        "target": target,
+        "branche": branche,
+        "period_from": period_from.strftime("%Y-%m-%d"),
+        "period_to": period_to.strftime("%Y-%m-%d"),
+        "period_label": period_label,
+        "sent_at_iso": datetime.utcnow().isoformat(),
+    }
+    append_record(NOTIF_LOG_SHEET, NOTIF_LOG_COLS, rec)
+
+
 # ================== Helpers ==================
 def normalize_phone(s: str) -> str:
     digits = "".join(c for c in str(s) if c.isdigit())
@@ -233,13 +273,21 @@ def as_float(x) -> float:
 
 # دالة مساعدة: تجهيز رسالة واتساب لمتربّص معيّن و فترة معيّنة
 def build_whatsapp_message_for_trainee(
-    tr_row, df_abs_all, df_sub_all, branch_name, d_from: date, d_to: date, period_label: str
+    tr_row,
+    df_abs_all,
+    df_sub_all,
+    branch_name,
+    d_from: date,
+    d_to: date,
+    period_label: str,
 ) -> tuple[str, list[str]]:
     """
     ترجع (message_text, info_lines)  — info_lines فقط لمعلومة تقنية في الواجهة.
     الرسالة فيها:
     - تفاصيل الغيابات سطر بسطر
-    - ملخص لكل مادة: مجموع الغياب غير المبرر + الباقي قبل الإقصاء (10٪)
+    - ملخص لكل مادة:
+      • سطر لمجموع الغياب غير المبرر
+      • سطر للباقي قبل الإقصاء (10٪) من مجموع الساعات الجملية
     """
     trainee_id = tr_row["id"]
     df_abs_t = df_abs_all[df_abs_all["trainee_id"] == trainee_id].copy()
@@ -382,6 +430,15 @@ def load_absences():
     return pd.DataFrame(vals[1:], columns=vals[0])
 
 
+@st.cache_data(ttl=300)
+def load_notifications():
+    ws = ensure_ws(NOTIF_LOG_SHEET, NOTIF_LOG_COLS)
+    vals = ws.get_all_values()
+    if not vals or len(vals) < 2:
+        return pd.DataFrame(columns=NOTIF_LOG_COLS)
+    return pd.DataFrame(vals[1:], columns=vals[0])
+
+
 # ================== Sidebar: اختيار الفرع + المودباس ==================
 st.sidebar.markdown("## ⚙️ إعدادات الفرع")
 
@@ -409,8 +466,14 @@ else:
 
 st.sidebar.success(f"أنت الآن داخل فرع: **{branch}**")
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["👤 المتكوّنون", "📚 المواد", "📅 الغيابات", "🚨 تنبيهات 10٪ + واتساب"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    [
+        "👤 المتكوّنون",
+        "📚 المواد",
+        "📅 الغيابات",
+        "🚨 تنبيهات 10٪ + واتساب",
+        "📜 سجل الإشعارات",
+    ]
 )
 
 # ----------------- تبويب 1: المتكوّنون -----------------
@@ -419,8 +482,6 @@ with tab1:
 
     df_tr = load_trainees()
     df_tr = df_tr[df_tr["branche"] == branch].copy()
-
-    specialites_exist = sorted([s for s in df_tr["specialite"].dropna().unique() if s])
 
     st.markdown("### ➕ إضافة متكوّن جديد")
     with st.form("add_trainee_form"):
@@ -645,7 +706,9 @@ with tab3:
     elif df_sub_b.empty:
         st.info("لا توجد مواد مضبوطة في هذا الفرع.")
     else:
-        specs_in_branch = sorted([s for s in df_tr_b["specialite"].dropna().unique() if s])
+        specs_in_branch = sorted(
+            [s for s in df_tr_b["specialite"].dropna().unique() if s]
+        )
         spec_choice = st.selectbox(
             "🔧 اختر التخصّص (لإظهار المتكوّنين)",
             ["(الكل)"] + specs_in_branch,
@@ -1121,7 +1184,9 @@ with tab4:
                 for _, r in df_tr_wa.iterrows()
             }
             label_tr_wa = st.selectbox(
-                "👤 اختر المتكوّن للرسالة", list(labels_map_wa.keys()), key="wa_trainee_single"
+                "👤 اختر المتكوّن للرسالة",
+                list(labels_map_wa.keys()),
+                key="wa_trainee_single",
             )
             trainee_id_wa = labels_map_wa[label_tr_wa]
             tr_row = df_tr_all[df_tr_all["id"] == trainee_id_wa].iloc[0]
@@ -1129,12 +1194,17 @@ with tab4:
             target_wa = st.radio(
                 "المرسل إليه", ["المتكوّن", "الولي"], horizontal=True, key="wa_target_single"
             )
-            phone_target = tr_row["telephone"] if target_wa == "المتكوّن" else tr_row["tel_parent"]
+            phone_target = (
+                tr_row["telephone"] if target_wa == "المتكوّن" else tr_row["tel_parent"]
+            )
             phone_target = normalize_phone(phone_target)
 
             st.markdown("#### 🕒 اختر الفترة")
             period_type = st.radio(
-                "نوع الفترة", ["يوم", "أسبوع", "شهر", "مخصص"], horizontal=True, key="wa_period_single"
+                "نوع الفترة",
+                ["يوم", "أسبوع", "شهر", "مخصص"],
+                horizontal=True,
+                key="wa_period_single",
             )
             today = date.today()
 
@@ -1154,7 +1224,9 @@ with tab4:
                 )
             elif period_type == "شهر":
                 any_day = st.date_input(
-                    "أي يوم من الشهر المطلوب", value=today, key="wa_month_day_single"
+                    "أي يوم من الشهر المطلوب",
+                    value=today,
+                    key="wa_month_day_single",
                 )
                 first = any_day.replace(day=1)
                 if first.month == 12:
@@ -1171,7 +1243,9 @@ with tab4:
                 colp1, colp2 = st.columns(2)
                 with colp1:
                     d_from = st.date_input(
-                        "من تاريخ", value=today - timedelta(days=7), key="wa_from_single"
+                        "من تاريخ",
+                        value=today - timedelta(days=7),
+                        key="wa_from_single",
                     )
                 with colp2:
                     d_to = st.date_input(
@@ -1189,24 +1263,45 @@ with tab4:
                     st.error("❌ ما فماش رقم هاتف مضبوط للمتكوّن/الولي.")
                 else:
                     msg, info_debug = build_whatsapp_message_for_trainee(
-                        tr_row, df_abs_all, df_sub_all, branch, d_from, d_to, period_label
+                        tr_row,
+                        df_abs_all,
+                        df_sub_all,
+                        branch,
+                        d_from,
+                        d_to,
+                        period_label,
                     )
                     if not msg:
                         st.info("لا توجد غيابات في هذه الفترة لهذا المتكوّن.")
                     else:
                         st.caption("معلومة تقنية: " + " | ".join(info_debug))
                         st.text_area(
-                            "نص الرسالة (يمكنك تعديله قبل الإرسال)", value=msg, height=250
+                            "نص الرسالة (يمكنك تعديله قبل الإرسال)",
+                            value=msg,
+                            height=250,
                         )
                         link = wa_link(phone_target, msg)
                         st.markdown(f"[📲 افتح رسالة الواتساب الجاهزة]({link})")
+
+                        # تسجيل في سجل الإشعارات
+                        append_notification_log(
+                            trainee_id=tr_row["id"],
+                            phone=phone_target,
+                            target="Trainee" if target_wa == "المتكوّن" else "Parent",
+                            branche=branch,
+                            period_from=d_from,
+                            period_to=d_to,
+                            period_label=period_label,
+                        )
 
         # -------- WhatsApp جماعي --------
         st.markdown("---")
         st.markdown("### 💬 رسائل واتساب جماعية (عدة متكوّنين في نفس الفترة)")
 
         spec_batch = st.selectbox(
-            "🔧 اختر التخصّص (لإرسال جماعي)", ["(الكل)"] + specs_branch, key="wa_spec_batch"
+            "🔧 اختر التخصّص (لإرسال جماعي)",
+            ["(الكل)"] + specs_branch,
+            key="wa_spec_batch",
         )
         df_tr_batch = df_tr_b.copy()
         if spec_batch != "(الكل)":
@@ -1217,7 +1312,10 @@ with tab4:
         else:
             st.markdown("#### 🕒 اختر الفترة المشتركة")
             period_type_b = st.radio(
-                "نوع الفترة", ["يوم", "أسبوع", "شهر", "مخصص"], horizontal=True, key="wa_period_batch"
+                "نوع الفترة",
+                ["يوم", "أسبوع", "شهر", "مخصص"],
+                horizontal=True,
+                key="wa_period_batch",
             )
             today_b = date.today()
 
@@ -1239,7 +1337,9 @@ with tab4:
                 )
             elif period_type_b == "شهر":
                 any_day_b = st.date_input(
-                    "أي يوم من الشهر المطلوب", value=today_b, key="wa_month_day_batch"
+                    "أي يوم من الشهر المطلوب",
+                    value=today_b,
+                    key="wa_month_day_batch",
                 )
                 first_b = any_day_b.replace(day=1)
                 if first_b.month == 12:
@@ -1256,7 +1356,9 @@ with tab4:
                 colpb1, colpb2 = st.columns(2)
                 with colpb1:
                     d_from_b = st.date_input(
-                        "من تاريخ", value=today_b - timedelta(days=7), key="wa_from_batch"
+                        "من تاريخ",
+                        value=today_b - timedelta(days=7),
+                        key="wa_from_batch",
                     )
                 with colpb2:
                     d_to_b = st.date_input(
@@ -1279,31 +1381,56 @@ with tab4:
             if st.button("📲 توليد روابط الواتساب لكل المتكوّنين (جماعي)"):
                 rows_out = []
                 for _, tr in df_tr_batch.iterrows():
-                    phone_t = tr["telephone"] if target_batch == "المتكوّن" else tr["tel_parent"]
+                    phone_t = (
+                        tr["telephone"]
+                        if target_batch == "المتكوّن"
+                        else tr["tel_parent"]
+                    )
                     phone_t = normalize_phone(phone_t)
                     if not phone_t:
                         continue
                     msg_t, _ = build_whatsapp_message_for_trainee(
-                        tr, df_abs_all, df_sub_all, branch, d_from_b, d_to_b, period_label_b
+                        tr,
+                        df_abs_all,
+                        df_sub_all,
+                        branch,
+                        d_from_b,
+                        d_to_b,
+                        period_label_b,
                     )
                     if not msg_t:
                         continue
                     link_t = wa_link(phone_t, msg_t)
                     rows_out.append(
                         {
+                            "trainee_id": tr["id"],
                             "المتكوّن": tr["nom"],
                             "التخصّص": tr.get("specialite", ""),
                             "الهاتف": phone_t,
-                            "رابط الواتساب": link_t,
+                            "رابط_الواتساب": link_t,
                         }
                     )
+
+                    # تسجيل في سجل الإشعارات لكل متكوّن في الإرسال الجماعي
+                    append_notification_log(
+                        trainee_id=tr["id"],
+                        phone=phone_t,
+                        target="Trainee" if target_batch == "المتكوّن" else "Parent",
+                        branche=branch,
+                        period_from=d_from_b,
+                        period_to=d_to_b,
+                        period_label=period_label_b,
+                    )
+
                 if not rows_out:
                     st.info(
                         "لا يوجد متكوّنين لديهم غيابات في هذه الفترة حسب الشروط."
                     )
                 else:
                     st.markdown("#### قائمة روابط الواتساب الجاهزة")
-                    st.caption("إضغط على الزر قدّام كل متكوّن لفتح المحادثة في نافذة جديدة.")
+                    st.caption(
+                        "إضغط على الزر قدّام كل متكوّن لفتح المحادثة في نافذة جديدة."
+                    )
 
                     for i, row in enumerate(rows_out, start=1):
                         st.markdown(
@@ -1312,7 +1439,7 @@ with tab4:
                               <b>{i}. {row['المتكوّن']}</b><br/>
                               التخصّص: {row.get('التخصّص','')}<br/>
                               الهاتف: {row['الهاتف']}<br/>
-                              <a href="{row['رابط الواتساب']}" target="_blank"
+                              <a href="{row['رابط_الواتساب']}" target="_blank"
                                  style="
                                     display:inline-block;
                                     margin-top:6px;
@@ -1330,3 +1457,72 @@ with tab4:
                             """,
                             unsafe_allow_html=True,
                         )
+
+# ----------------- تبويب 5: سجل الإشعارات -----------------
+with tab5:
+    st.subheader("📜 سجل الإشعارات المرسلة")
+
+    df_tr_all = load_trainees()
+    df_notif = load_notifications()
+
+    if df_notif.empty:
+        st.info("ما زال ما تمّ تسجيل حتى إشعار مرسل.")
+    else:
+        # نركّز على الفرع الحالي
+        df_notif_b = df_notif[df_notif["branche"] == branch].copy()
+        if df_notif_b.empty:
+            st.info("ما فماش إشعارات مسجلة لهذا الفرع.")
+        else:
+            # نربط مع المتكوّنين باش ناخذ الاسم و التخصّص
+            df_tr_all_small = df_tr_all[["id", "nom", "specialite"]].rename(
+                columns={"id": "trainee_id"}
+            )
+            df_notif_b = df_notif_b.merge(
+                df_tr_all_small, on="trainee_id", how="left"
+            )
+
+            # تنسيق التاريخ
+            def fmt_ts(x: str) -> str:
+                try:
+                    dt = datetime.fromisoformat(x)
+                    return dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    return x
+
+            df_notif_b["تاريخ الإرسال"] = df_notif_b["sent_at_iso"].apply(fmt_ts)
+
+            df_notif_b = df_notif_b.sort_values(
+                "sent_at_iso", ascending=False
+            ).reset_index(drop=True)
+
+            show_cols = [
+                "تاريخ الإرسال",
+                "nom",
+                "specialite",
+                "phone",
+                "target",
+                "period_label",
+            ]
+            df_notif_b = df_notif_b.rename(
+                columns={
+                    "nom": "المتكوّن",
+                    "specialite": "التخصّص",
+                    "phone": "الهاتف",
+                    "target": "المرسل إليه",
+                    "period_label": "الفترة",
+                }
+            )
+
+            st.dataframe(
+                df_notif_b[
+                    [
+                        "تاريخ الإرسال",
+                        "المتكوّن",
+                        "التخصّص",
+                        "الهاتف",
+                        "المرسل إليه",
+                        "الفترة",
+                    ]
+                ],
+                use_container_width=True,
+            )
