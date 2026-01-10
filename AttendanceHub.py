@@ -1,6 +1,6 @@
 # AttendanceHub_GSheets.py
 # إدارة الغيابات للمكوّنين + Google Sheets backend (فرع MB/Bizerte)
-# تنبيهات 10٪ + واتساب (فردي/جماعي) + حذف جماعي + Import من Excel/CSV
+# واتساب (فردي/جماعي) + حذف جماعي + Import من Excel/CSV
 # + سجل الإشعارات (Notifications_Log)
 
 import json
@@ -23,7 +23,7 @@ st.markdown(
     """
     <div style='text-align:center'>
       <h1>🕒 AttendanceHub - إدارة الغيابات</h1>
-      <p>متكوّنين، مواد، غيابات، تنبيهات 10٪ - مع Google Sheets</p>
+      <p>متكوّنين، مواد، غيابات، 10٪ - مع Google Sheets</p>
     </div>
     <hr/>
     """,
@@ -44,9 +44,7 @@ def make_client_and_sheet_id():
             client = gspread.authorize(creds)
 
             if "SPREADSHEET_ID" not in st.secrets:
-                st.error(
-                    "⚠️ المفتاح SPREADSHEET_ID مش موجود في secrets.\nزيدو في Streamlit secrets."
-                )
+                st.error("⚠️ المفتاح SPREADSHEET_ID مش موجود في secrets.\nزيدو في Streamlit secrets.")
                 st.stop()
 
             sheet_id = st.secrets["SPREADSHEET_ID"]
@@ -58,9 +56,7 @@ def make_client_and_sheet_id():
     # 2) لو تخدم لوكال وتنجم تستعمل ملف service_account.json
     elif os.path.exists("service_account.json"):
         try:
-            creds = Credentials.from_service_account_file(
-                "service_account.json", scopes=SCOPE
-            )
+            creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPE)
             client = gspread.authorize(creds)
             sheet_id = "PUT_YOUR_SHEET_ID_HERE"  # بدّلها لو تخدم لوكال
             return client, sheet_id
@@ -86,16 +82,7 @@ SUBJECTS_SHEET = "Subjects"
 ABSENCES_SHEET = "Absences"
 NOTIF_LOG_SHEET = "Notifications_Log"
 
-TRAINEES_COLS = [
-    "id",
-    "nom",
-    "telephone",
-    "tel_parent",
-    "branche",
-    "specialite",
-    "date_debut",
-    "actif",
-]
+TRAINEES_COLS = ["id", "nom", "telephone", "tel_parent", "branche", "specialite", "date_debut", "actif"]
 
 SUBJECTS_COLS = [
     "id",
@@ -106,15 +93,7 @@ SUBJECTS_COLS = [
     "heures_semaine",
 ]
 
-ABSENCES_COLS = [
-    "id",
-    "trainee_id",
-    "subject_id",
-    "date",
-    "heures_absence",
-    "justifie",
-    "commentaire",
-]
+ABSENCES_COLS = ["id", "trainee_id", "subject_id", "date", "heures_absence", "justifie", "commentaire"]
 
 NOTIF_LOG_COLS = [
     "id",
@@ -129,7 +108,6 @@ NOTIF_LOG_COLS = [
 ]
 
 # ============= Utils Sheets =============
-
 
 def get_spreadsheet():
     if st.session_state.get("sh_id") == SPREADSHEET_ID and "sh_obj" in st.session_state:
@@ -175,10 +153,8 @@ def delete_record_by_id(sheet_name: str, cols: list[str], rec_id: str):
     if not vals or len(vals) < 2:
         return
     header = vals[0]
-    if "id" in header:
-        id_idx = header.index("id")
-    else:
-        id_idx = 0
+    id_idx = header.index("id") if "id" in header else 0
+
     for i, r in enumerate(vals[1:], start=2):
         if len(r) > id_idx and r[id_idx] == rec_id:
             ws.delete_rows(i)
@@ -186,9 +162,7 @@ def delete_record_by_id(sheet_name: str, cols: list[str], rec_id: str):
             break
 
 
-def update_record_fields_by_id(
-    sheet_name: str, cols: list[str], rec_id: str, updates: dict
-):
+def update_record_fields_by_id(sheet_name: str, cols: list[str], rec_id: str, updates: dict):
     ws = ensure_ws(sheet_name, cols)
     vals = ws.get_all_values()
     if not vals or len(vals) < 2:
@@ -197,6 +171,7 @@ def update_record_fields_by_id(
     if "id" not in header:
         return
     id_idx = header.index("id")
+
     row_idx = None
     for i, r in enumerate(vals[1:], start=2):
         if len(r) > id_idx and r[id_idx] == rec_id:
@@ -204,11 +179,41 @@ def update_record_fields_by_id(
             break
     if not row_idx:
         return
+
     for field, value in updates.items():
         if field in header:
             col_idx = header.index(field) + 1
             ws.update_cell(row_idx, col_idx, str(value))
     st.cache_data.clear()
+
+
+def delete_records_by_branch(sheet_name: str, cols: list[str], branch_value: str):
+    """
+    حذف كل السجلات اللي عندها colonne 'branche' == branch_value
+    (يبقي الهيدر)
+    """
+    ws = ensure_ws(sheet_name, cols)
+    vals = ws.get_all_values()
+    if not vals or len(vals) < 2:
+        return 0
+
+    header = vals[0]
+    if "branche" not in header:
+        return 0
+    b_idx = header.index("branche")
+
+    # نجمع أرقام الصفوف اللي باش تتحذف (من تحت لفوق)
+    rows_to_delete = []
+    for i, r in enumerate(vals[1:], start=2):
+        if len(r) > b_idx and r[b_idx] == branch_value:
+            rows_to_delete.append(i)
+
+    for row_i in reversed(rows_to_delete):
+        ws.delete_rows(row_i)
+
+    if rows_to_delete:
+        st.cache_data.clear()
+    return len(rows_to_delete)
 
 
 def append_notification_log(
@@ -220,9 +225,6 @@ def append_notification_log(
     period_to: date,
     period_label: str,
 ):
-    """
-    تسجيل إرسال إشعار واتساب في شيت Notifications_Log
-    """
     rec = {
         "id": uuid.uuid4().hex[:12],
         "trainee_id": trainee_id,
@@ -271,7 +273,6 @@ def as_float(x) -> float:
         return 0.0
 
 
-# دالة مساعدة: تجهيز رسالة واتساب لمتربّص معيّن و فترة معيّنة
 def build_whatsapp_message_for_trainee(
     tr_row,
     df_abs_all,
@@ -281,31 +282,19 @@ def build_whatsapp_message_for_trainee(
     d_to: date,
     period_label: str,
 ) -> tuple[str, list[str]]:
-    """
-    ترجع (message_text, info_lines)  — info_lines فقط لمعلومة تقنية في الواجهة.
-    الرسالة فيها:
-    - تفاصيل الغيابات سطر بسطر
-    - ملخص لكل مادة:
-      • سطر لمجموع الغياب غير المبرر
-      • سطر للباقي قبل الإقصاء (10٪) من مجموع الساعات الجملية
-    """
     trainee_id = tr_row["id"]
     df_abs_t = df_abs_all[df_abs_all["trainee_id"] == trainee_id].copy()
 
     if df_abs_t.empty:
         return "", ["لا توجد غيابات لهذا المتكوّن في أي فترة."]
 
-    # فلترة حسب الفترة
     df_abs_t["date_dt"] = pd.to_datetime(df_abs_t["date"], errors="coerce")
-    mask_period = (df_abs_t["date_dt"].dt.date >= d_from) & (
-        df_abs_t["date_dt"].dt.date <= d_to
-    )
+    mask_period = (df_abs_t["date_dt"].dt.date >= d_from) & (df_abs_t["date_dt"].dt.date <= d_to)
     df_abs_period = df_abs_t[mask_period].copy()
 
     if df_abs_period.empty:
         return "", ["لا توجد غيابات في هذه الفترة."]
 
-    # إلحاق أسماء المواد وعدد الساعات الإجمالية
     df_abs_period = df_abs_period.merge(
         df_sub_all[["id", "nom_matiere", "heures_totales"]],
         left_on="subject_id",
@@ -314,19 +303,14 @@ def build_whatsapp_message_for_trainee(
         suffixes=("", "_sub"),
     )
 
-    # تفاصيل الغيابات سطر بسطر
     detail_lines = []
     for _, r in df_abs_period.iterrows():
-        if pd.notna(r["date_dt"]):
-            dstr = r["date_dt"].strftime("%Y-%m-%d")
-        else:
-            dstr = str(r["date"])
+        dstr = r["date_dt"].strftime("%Y-%m-%d") if pd.notna(r["date_dt"]) else str(r["date"])
         subj = str(r.get("nom_matiere", "") or "").strip()
         h = as_float(r.get("heures_absence", 0))
         just = "مبرر" if str(r.get("justifie", "")).strip() == "Oui" else "غير مبرر"
         detail_lines.append(f"- {dstr} | {subj} | {h:.2f} ساعة ({just})")
 
-    # نحسب الغيابات غير المبررة فقط لموضوع 10٪
     df_eff_t = df_abs_period[df_abs_period["justifie"] != "Oui"].copy()
     df_eff_t["heures_absence_f"] = df_eff_t["heures_absence"].apply(as_float)
     df_eff_t["heures_totales_f"] = df_eff_t["heures_totales"].apply(as_float)
@@ -347,10 +331,6 @@ def build_whatsapp_message_for_trainee(
             total_abs = g["total_abs"]
             remaining = g["remaining"]
 
-            # الشكل المطلوب:
-            # Organisation De L'Administration Douanière:
-            # • مجموع الغياب غير المبرر: 1.50 ساعة
-            # • الباقي قبل الإقصاء (10٪): 6.90 ساعة من مجموع الساعات الجملية
             stats_lines.append(
                 f"- {mat_name}:\n"
                 f"   • مجموع الغياب غير المبرر: {total_abs:.2f} ساعة\n"
@@ -360,13 +340,9 @@ def build_whatsapp_message_for_trainee(
             if remaining <= 0:
                 elim_lines.append(f"- {mat_name}")
 
-    # ===== بناء الرسالة مرتبة =====
     msg_lines = []
-
     msg_lines.append("السلام عليكم،")
-    msg_lines.append(
-        "إدارة هيكل التكوين تحب تعلمك بتفاصيل الغيابات اللي تمّ تسجيلها في الفترة المحدّدة:"
-    )
+    msg_lines.append("إدارة هيكل التكوين تحب تعلمك بتفاصيل الغيابات اللي تمّ تسجيلها في الفترة المحدّدة:")
     msg_lines.append("")
     msg_lines.append(f"👤 المتكوّن: {tr_row.get('nom', '')}")
     msg_lines.append(f"🏫 الفرع: {branch_name}")
@@ -376,18 +352,14 @@ def build_whatsapp_message_for_trainee(
     msg_lines.append("📋 تفاصيل الغيابات في هذه الفترة:")
     msg_lines.extend(detail_lines)
 
-    # ملخّص 10٪ (مجموع غير مبرر + الباقي قبل الإقصاء)
     if stats_lines:
         msg_lines.append("")
         msg_lines.append("📊 ملخّص الغيابات غير المبررة حسب المواد:")
         msg_lines.extend(stats_lines)
 
-    # المواد اللي تعدّت 10٪ (إقصاء محتمل)
     if elim_lines:
         msg_lines.append("")
-        msg_lines.append(
-            "⚠️ تنبيه: في بعض المواد تمّ تجاوز الحد الأقصى للغيابات ويمكن يترتّب عليه الإقصاء:"
-        )
+        msg_lines.append("⚠️ تنبيه: في بعض المواد تمّ تجاوز الحد الأقصى للغيابات ويمكن يترتّب عليه الإقصاء:")
         msg_lines.extend(elim_lines)
 
     msg_lines.append("")
@@ -460,9 +432,7 @@ if pw_need:
                 st.sidebar.error("كلمة سرّ غير صحيحة ❌")
         st.stop()
 else:
-    st.sidebar.warning(
-        "⚠️ لم يتم ضبط كلمة المرور لهذا الفرع في secrets.branch_passwords"
-    )
+    st.sidebar.warning("⚠️ لم يتم ضبط كلمة المرور لهذا الفرع في secrets.branch_passwords")
 
 st.sidebar.success(f"أنت الآن داخل فرع: **{branch}**")
 
@@ -471,7 +441,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
         "👤 المتكوّنون",
         "📚 المواد",
         "📅 الغيابات",
-        "🚨 تنبيهات 10٪ + واتساب",
+        "🚨 تجاوز 10٪ + واتساب",
         "📜 سجل الإشعارات",
     ]
 )
@@ -523,17 +493,7 @@ with tab1:
         st.info("لا يوجد متكوّنون بعد في هذا الفرع.")
     else:
         st.dataframe(
-            df_tr[
-                [
-                    "id",
-                    "nom",
-                    "telephone",
-                    "tel_parent",
-                    "specialite",
-                    "date_debut",
-                    "actif",
-                ]
-            ],
+            df_tr[["id", "nom", "telephone", "tel_parent", "specialite", "date_debut", "actif"]],
             use_container_width=True,
         )
 
@@ -561,8 +521,18 @@ with tab2:
     df_sub = load_subjects()
     df_sub = df_sub[df_sub["branche"] == branch].copy()
 
+    # ✅ specs_all لازم يشمل حتى التخصّصات اللي موجودة في Subjects (باش multiselect ما يطيّحش)
     df_tr_all = load_trainees()
-    specs_all = sorted([s for s in df_tr_all["specialite"].dropna().unique() if s])
+    specs_from_trainees = [
+        s.strip() for s in df_tr_all["specialite"].dropna().unique().tolist()
+        if str(s).strip()
+    ]
+    df_sub_all_for_specs = load_subjects()
+    specs_from_subjects = []
+    for x in df_sub_all_for_specs["specialites"].dropna().tolist():
+        parts = [p.strip() for p in str(x).split(",") if p.strip()]
+        specs_from_subjects.extend(parts)
+    specs_all = sorted(set(specs_from_trainees + specs_from_subjects))
 
     st.markdown("### ➕ إضافة مادة جديدة")
     with st.form("add_subject_form"):
@@ -570,18 +540,11 @@ with tab2:
         with col1:
             mat_nom = st.text_input("اسم المادة")
         with col2:
-            heures_tot = st.number_input(
-                "إجمالي الساعات (للمادة)", min_value=0.0, step=1.0
-            )
+            heures_tot = st.number_input("إجمالي الساعات (للمادة)", min_value=0.0, step=1.0)
         with col3:
-            heures_week = st.number_input(
-                "عدد الساعات في الأسبوع", min_value=0.0, step=1.0
-            )
+            heures_week = st.number_input("عدد الساعات في الأسبوع", min_value=0.0, step=1.0)
 
-        spec_choices = st.multiselect(
-            "🔧 التخصّصات المرتبطة بهذه المادة (يمكن أكثر من تخصّص)", specs_all
-        )
-
+        spec_choices = st.multiselect("🔧 التخصّصات المرتبطة بهذه المادة (يمكن أكثر من تخصّص)", specs_all)
         sub_submit = st.form_submit_button("📥 حفظ المادة")
 
     if sub_submit:
@@ -612,12 +575,8 @@ with tab2:
     else:
         df_show = df_sub.copy()
         df_show["specialites"] = df_show["specialites"].fillna("")
-        st.dataframe(
-            df_show[
-                ["id", "nom_matiere", "specialites", "heures_totales", "heures_semaine"]
-            ],
-            use_container_width=True,
-        )
+        st.dataframe(df_show[["id", "nom_matiere", "specialites", "heures_totales", "heures_semaine"]],
+                     use_container_width=True)
 
         st.markdown("### ✏️ تعديل مادة")
         opts_edit = [
@@ -632,25 +591,16 @@ with tab2:
             with st.form("edit_subject_form"):
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    new_name = st.text_input(
-                        "اسم المادة", value=row_edit["nom_matiere"]
-                    )
+                    new_name = st.text_input("اسم المادة", value=row_edit["nom_matiere"])
                 with col2:
-                    new_tot = st.number_input(
-                        "إجمالي الساعات",
-                        value=as_float(row_edit["heures_totales"]),
-                        step=1.0,
-                    )
+                    new_tot = st.number_input("إجمالي الساعات", value=as_float(row_edit["heures_totales"]), step=1.0)
                 with col3:
-                    new_week = st.number_input(
-                        "ساعات في الأسبوع",
-                        value=as_float(row_edit["heures_semaine"]),
-                        step=1.0,
-                    )
-                current_specs = [s for s in str(row_edit["specialites"]).split(",") if s]
-                new_specs = st.multiselect(
-                    "التخصّصات", specs_all, default=current_specs
-                )
+                    new_week = st.number_input("ساعات في الأسبوع", value=as_float(row_edit["heures_semaine"]), step=1.0)
+
+                current_specs = [s.strip() for s in str(row_edit["specialites"]).split(",") if s.strip()]
+                current_specs = [s for s in current_specs if s in specs_all]  # ✅ مهم
+                new_specs = st.multiselect("التخصّصات", specs_all, default=current_specs)
+
                 sub_ok = st.form_submit_button("💾 حفظ التعديلات")
 
             if sub_ok:
@@ -662,23 +612,16 @@ with tab2:
                         "heures_semaine": str(new_week),
                         "specialites": ",".join(new_specs),
                     }
-                    update_record_fields_by_id(
-                        SUBJECTS_SHEET, SUBJECTS_COLS, sid, updates
-                    )
+                    update_record_fields_by_id(SUBJECTS_SHEET, SUBJECTS_COLS, sid, updates)
                     st.success("✅ تم تعديل المادة.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"خطأ أثناء تعديل المادة: {e}")
 
         st.markdown("### 🗑️ حذف مادة")
-        opts_del = [
-            f"[{i}] {r['nom_matiere']} — {r['specialites']}"
-            for i, (_, r) in enumerate(df_sub.iterrows())
-        ]
+        opts_del = [f"[{i}] {r['nom_matiere']} — {r['specialites']}" for i, (_, r) in enumerate(df_sub.iterrows())]
         if opts_del:
-            pick_del = st.selectbox(
-                "اختر مادة للحذف", opts_del, key="del_subject_pick"
-            )
+            pick_del = st.selectbox("اختر مادة للحذف", opts_del, key="del_subject_pick")
             if st.button("❗ حذف المادة"):
                 try:
                     idxd = int(pick_del.split("]")[0].replace("[", "").strip())
@@ -688,6 +631,21 @@ with tab2:
                     st.rerun()
                 except Exception as e:
                     st.error(f"خطأ أثناء الحذف: {e}")
+
+        st.markdown("---")
+        st.markdown("### 🧨 حذف كل المواد (في هذا الفرع)")
+        st.warning("تنبيه: هذا يحذف **كل المواد** متاع الفرع الحالي فقط.")
+        confirm_del_all = st.checkbox("أنا متأكد نحب نحذف كل المواد في هذا الفرع", key="confirm_del_all_subjects")
+        if st.button("🗑️ حذف كل مواد الفرع"):
+            if not confirm_del_all:
+                st.error("لازم تعمل ✅ تأكيد قبل الحذف.")
+            else:
+                try:
+                    n = delete_records_by_branch(SUBJECTS_SHEET, SUBJECTS_COLS, branch)
+                    st.success(f"✅ تم حذف {n} مادة من فرع {branch}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"خطأ أثناء حذف كل المواد: {e}")
 
 # ----------------- تبويب 3: الغيابات -----------------
 with tab3:
@@ -706,44 +664,30 @@ with tab3:
     elif df_sub_b.empty:
         st.info("لا توجد مواد مضبوطة في هذا الفرع.")
     else:
-        specs_in_branch = sorted(
-            [s for s in df_tr_b["specialite"].dropna().unique() if s]
-        )
-        spec_choice = st.selectbox(
-            "🔧 اختر التخصّص (لإظهار المتكوّنين)",
-            ["(الكل)"] + specs_in_branch,
-        )
+        specs_in_branch = sorted([s for s in df_tr_b["specialite"].dropna().unique() if s])
+        spec_choice = st.selectbox("🔧 اختر التخصّص (لإظهار المتكوّنين)", ["(الكل)"] + specs_in_branch)
         if spec_choice != "(الكل)":
             df_tr_b = df_tr_b[df_tr_b["specialite"] == spec_choice].copy()
 
         if df_tr_b.empty:
             st.info("لا يوجد متكوّنون بهذا التخصّص في هذا الفرع.")
         else:
-            # ---- إضافة غياب جديد ----
             st.markdown("### ➕ إضافة غياب")
 
-            options_tr = [
-                f"[{i}] {r['nom']} — {r['specialite']} ({r['telephone']})"
-                for i, (_, r) in enumerate(df_tr_b.iterrows())
-            ]
+            options_tr = [f"[{i}] {r['nom']} — {r['specialite']} ({r['telephone']})"
+                          for i, (_, r) in enumerate(df_tr_b.iterrows())]
             tr_pick = st.selectbox("اختر المتكوّن", options_tr)
             idx_tr = int(tr_pick.split("]")[0].replace("[", "").strip())
             row_tr = df_tr_b.iloc[idx_tr]
 
             spec_tr = str(row_tr["specialite"])
-            df_sub_for_tr = df_sub_b[
-                df_sub_b["specialites"].fillna("").str.contains(spec_tr)
-            ].copy()
+            df_sub_for_tr = df_sub_b[df_sub_b["specialites"].fillna("").str.contains(spec_tr)].copy()
 
             if df_sub_for_tr.empty:
-                st.warning(
-                    "لا توجد مواد مربوطة بهذا التخصّص. اضبط المواد في تبويب المواد."
-                )
+                st.warning("لا توجد مواد مربوطة بهذا التخصّص. اضبط المواد في تبويب المواد.")
             else:
-                opts_sub = [
-                    f"[{i}] {r['nom_matiere']} ({r['heures_totales']}h)"
-                    for i, (_, r) in enumerate(df_sub_for_tr.iterrows())
-                ]
+                opts_sub = [f"[{i}] {r['nom_matiere']} ({r['heures_totales']}h)"
+                            for i, (_, r) in enumerate(df_sub_for_tr.iterrows())]
                 sub_pick = st.selectbox("اختر المادة", opts_sub)
                 idx_sub = int(sub_pick.split("]")[0].replace("[", "").strip())
                 row_sub = df_sub_for_tr.iloc[idx_sub]
@@ -753,13 +697,9 @@ with tab3:
                     with col1:
                         abs_date = st.date_input("تاريخ الغياب", value=date.today())
                     with col2:
-                        h_abs = st.number_input(
-                            "عدد ساعات الغياب", min_value=0.0, step=0.5
-                        )
+                        h_abs = st.number_input("عدد ساعات الغياب", min_value=0.0, step=0.5)
                     with col3:
-                        is_justified = st.checkbox(
-                            "غياب مبرر (شهادة طبية؟)", value=False
-                        )
+                        is_justified = st.checkbox("غياب مبرر (شهادة طبية؟)", value=False)
 
                     comment = st.text_area("ملاحظة (اختياري)")
                     submit_abs = st.form_submit_button("📥 حفظ الغياب")
@@ -781,10 +721,10 @@ with tab3:
                         try:
                             append_record(ABSENCES_SHEET, ABSENCES_COLS, rec)
                             st.success("✅ تم تسجيل الغياب.")
+                            st.rerun()
                         except Exception as e:
                             st.error(f"خطأ أثناء تسجيل الغياب: {e}")
 
-            # ---- تعديل / حذف غياب واحد ----
             st.markdown("---")
             st.markdown("### ✏️ تعديل / 🗑️ حذف غياب مفرد")
 
@@ -796,9 +736,7 @@ with tab3:
                 df_abs["heures_absence_f"] = df_abs["heures_absence"].apply(as_float)
 
                 df_abs = df_abs.merge(
-                    df_tr_all[
-                        ["id", "nom", "branche", "specialite", "telephone"]
-                    ],
+                    df_tr_all[["id", "nom", "branche", "specialite", "telephone"]],
                     left_on="trainee_id",
                     right_on="id",
                     how="left",
@@ -816,20 +754,14 @@ with tab3:
                 if df_abs.empty:
                     st.info("لا توجد غيابات في هذا الفرع.")
                 else:
-                    df_abs["date_dt"] = pd.to_datetime(
-                        df_abs["date"], errors="coerce"
-                    )
-                    df_abs = df_abs.sort_values(
-                        "date_dt", ascending=False
-                    ).reset_index(drop=True)
+                    df_abs["date_dt"] = pd.to_datetime(df_abs["date"], errors="coerce")
+                    df_abs = df_abs.sort_values("date_dt", ascending=False).reset_index(drop=True)
 
                     options_abs_edit = [
                         f"[{i}] {r['nom']} — {r['nom_matiere']} — {r['date']} — {r['heures_absence_f']}h — مبرر: {r['justifie']}"
                         for i, (_, r) in enumerate(df_abs.iterrows())
                     ]
-                    pick_abs = st.selectbox(
-                        "اختر الغياب للتعديل / الحذف", options_abs_edit
-                    )
+                    pick_abs = st.selectbox("اختر الغياب للتعديل / الحذف", options_abs_edit)
 
                     if pick_abs:
                         idx_abs = int(pick_abs.split("]")[0].replace("[", "").strip())
@@ -838,38 +770,18 @@ with tab3:
                         with st.form("edit_abs_form"):
                             col1, col2, col3 = st.columns(3)
                             with col1:
-                                base_date = (
-                                    row_a["date_dt"].date()
-                                    if pd.notna(row_a["date_dt"])
-                                    else date.today()
-                                )
-                                new_date = st.date_input(
-                                    "تاريخ الغياب", value=base_date
-                                )
+                                base_date = row_a["date_dt"].date() if pd.notna(row_a["date_dt"]) else date.today()
+                                new_date = st.date_input("تاريخ الغياب", value=base_date)
                             with col2:
-                                new_hours = st.number_input(
-                                    "ساعات الغياب",
-                                    value=float(row_a["heures_absence_f"]),
-                                    step=0.5,
-                                )
+                                new_hours = st.number_input("ساعات الغياب", value=float(row_a["heures_absence_f"]), step=0.5)
                             with col3:
-                                new_just = st.selectbox(
-                                    "مبرر؟",
-                                    ["Non", "Oui"],
-                                    index=(
-                                        1
-                                        if str(row_a["justifie"]).strip() == "Oui"
-                                        else 0
-                                    ),
-                                )
-                            new_comment = st.text_area(
-                                "ملاحظة", value=str(row_a.get("commentaire", ""))
-                            )
+                                new_just = st.selectbox("مبرر؟", ["Non", "Oui"],
+                                                        index=1 if str(row_a["justifie"]).strip() == "Oui" else 0)
+                            new_comment = st.text_area("ملاحظة", value=str(row_a.get("commentaire", "")))
+
                             cols_btn = st.columns(2)
                             with cols_btn[0]:
-                                submit_edit_abs = st.form_submit_button(
-                                    "💾 حفظ التعديل"
-                                )
+                                submit_edit_abs = st.form_submit_button("💾 حفظ التعديل")
                             with cols_btn[1]:
                                 delete_abs = st.form_submit_button("🗑️ حذف هذا الغياب")
 
@@ -882,9 +794,7 @@ with tab3:
                                     "justifie": new_just,
                                     "commentaire": new_comment.strip(),
                                 }
-                                update_record_fields_by_id(
-                                    ABSENCES_SHEET, ABSENCES_COLS, aid, updates
-                                )
+                                update_record_fields_by_id(ABSENCES_SHEET, ABSENCES_COLS, aid, updates)
                                 st.success("✅ تم تعديل الغياب.")
                                 st.rerun()
                             except Exception as e:
@@ -893,15 +803,12 @@ with tab3:
                         if delete_abs:
                             try:
                                 aid = row_a["id_x"] if "id_x" in row_a else row_a["id"]
-                                delete_record_by_id(
-                                    ABSENCES_SHEET, ABSENCES_COLS, aid
-                                )
+                                delete_record_by_id(ABSENCES_SHEET, ABSENCES_COLS, aid)
                                 st.success("✅ تم حذف الغياب.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"خطأ أثناء حذف الغياب: {e}")
 
-            # ---- حذف جماعي (Bulk) ----
             st.markdown("---")
             st.markdown("### 🗑️ حذف مجموعة غيابات (Bulk)")
 
@@ -909,12 +816,8 @@ with tab3:
             if df_abs_all.empty:
                 st.info("لا توجد غيابات للحذف.")
             else:
-                specs_bulk = sorted(
-                    [s for s in df_tr_b["specialite"].dropna().unique() if s]
-                )
-                spec_bulk = st.selectbox(
-                    "🔧 التخصّص (للحذف الجماعي)", ["(الكل)"] + specs_bulk
-                )
+                specs_bulk = sorted([s for s in df_tr_b["specialite"].dropna().unique() if s])
+                spec_bulk = st.selectbox("🔧 التخصّص (للحذف الجماعي)", ["(الكل)"] + specs_bulk)
                 df_tr_bulk = df_tr_b.copy()
                 if spec_bulk != "(الكل)":
                     df_tr_bulk = df_tr_bulk[df_tr_bulk["specialite"] == spec_bulk]
@@ -926,14 +829,10 @@ with tab3:
                         f"{r['nom']} — {r['specialite']} ({r['telephone']})": r["id"]
                         for _, r in df_tr_bulk.iterrows()
                     }
-                    label_tr_bulk = st.selectbox(
-                        "👤 اختر المتكوّن", list(labels_map_bulk.keys())
-                    )
+                    label_tr_bulk = st.selectbox("👤 اختر المتكوّن", list(labels_map_bulk.keys()))
                     trainee_id_bulk = labels_map_bulk[label_tr_bulk]
 
-                    df_abs_t_bulk = df_abs_all[
-                        df_abs_all["trainee_id"] == trainee_id_bulk
-                    ].copy()
+                    df_abs_t_bulk = df_abs_all[df_abs_all["trainee_id"] == trainee_id_bulk].copy()
                     if df_abs_t_bulk.empty:
                         st.info("لا توجد غيابات لهذا المتكوّن.")
                     else:
@@ -945,18 +844,12 @@ with tab3:
                             suffixes=("", "_sub"),
                         )
 
-                        sub_choices_bulk = sorted(
-                            df_abs_t_bulk["nom_matiere"].dropna().unique()
-                        )
-                        sub_bulk = st.selectbox(
-                            "📚 المادة (اختياري)", ["(الكل)"] + sub_choices_bulk
-                        )
+                        sub_choices_bulk = sorted(df_abs_t_bulk["nom_matiere"].dropna().unique())
+                        sub_bulk = st.selectbox("📚 المادة (اختياري)", ["(الكل)"] + sub_choices_bulk)
 
                         colb1, colb2 = st.columns(2)
                         with colb1:
-                            d_from_bulk = st.date_input(
-                                "من تاريخ", value=date.today() - timedelta(days=7)
-                            )
+                            d_from_bulk = st.date_input("من تاريخ", value=date.today() - timedelta(days=7))
                         with colb2:
                             d_to_bulk = st.date_input("إلى تاريخ", value=date.today())
 
@@ -965,34 +858,22 @@ with tab3:
                         else:
                             if st.button("🗑️ حذف كل الغيابات في هذه الفترة"):
                                 try:
-                                    df_abs_t_bulk["date_dt"] = pd.to_datetime(
-                                        df_abs_t_bulk["date"], errors="coerce"
-                                    )
-                                    mask = (df_abs_t_bulk["date_dt"].dt.date >= d_from_bulk) & (
-                                        df_abs_t_bulk["date_dt"].dt.date <= d_to_bulk
-                                    )
+                                    df_abs_t_bulk["date_dt"] = pd.to_datetime(df_abs_t_bulk["date"], errors="coerce")
+                                    mask = (df_abs_t_bulk["date_dt"].dt.date >= d_from_bulk) & (df_abs_t_bulk["date_dt"].dt.date <= d_to_bulk)
                                     if sub_bulk != "(الكل)":
-                                        mask &= df_abs_t_bulk[
-                                            "nom_matiere"
-                                        ] == sub_bulk
+                                        mask &= (df_abs_t_bulk["nom_matiere"] == sub_bulk)
+
                                     to_del = df_abs_t_bulk[mask]
                                     if to_del.empty:
                                         st.info("لا توجد غيابات مطابقة للحذف.")
                                     else:
                                         for _, rdel in to_del.iterrows():
-                                            delete_record_by_id(
-                                                ABSENCES_SHEET,
-                                                ABSENCES_COLS,
-                                                rdel["id"],
-                                            )
-                                        st.success(
-                                            f"✅ تم حذف {len(to_del)} غياب(ات)."
-                                        )
+                                            delete_record_by_id(ABSENCES_SHEET, ABSENCES_COLS, rdel["id"])
+                                        st.success(f"✅ تم حذف {len(to_del)} غياب(ات).")
                                         st.rerun()
                                 except Exception as e:
                                     st.error(f"خطأ أثناء الحذف الجماعي: {e}")
 
-            # ---- Import من Excel/CSV ----
             st.markdown("---")
             st.markdown("### 📥 استيراد غيابات من ملف Excel/CSV")
 
@@ -1005,28 +886,11 @@ with tab3:
                 "إختياري: justifie (Oui/Non)، commentaire.\n"
             )
 
-            # نموذج فارغ للتحميل
-            template_df = pd.DataFrame(
-                {
-                    "trainee_id": [],
-                    "subject_id": [],
-                    "date": [],
-                    "heures_absence": [],
-                    "justifie": [],
-                    "commentaire": [],
-                }
-            )
+            template_df = pd.DataFrame({"trainee_id": [], "subject_id": [], "date": [], "heures_absence": [], "justifie": [], "commentaire": []})
             tmpl_csv = template_df.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "⬇️ تحميل نموذج CSV فارغ",
-                data=tmpl_csv,
-                file_name="absences_template.csv",
-                mime="text/csv",
-            )
+            st.download_button("⬇️ تحميل نموذج CSV فارغ", data=tmpl_csv, file_name="absences_template.csv", mime="text/csv")
 
-            uploaded = st.file_uploader(
-                "حمّل ملف الغيابات (CSV أو Excel)", type=["csv", "xlsx"]
-            )
+            uploaded = st.file_uploader("حمّل ملف الغيابات (CSV أو Excel)", type=["csv", "xlsx"])
             if uploaded is not None:
                 try:
                     if uploaded.name.lower().endswith(".xlsx"):
@@ -1036,9 +900,7 @@ with tab3:
 
                     req_cols = {"trainee_id", "subject_id", "date", "heures_absence"}
                     if not req_cols.issubset(set(df_up.columns)):
-                        st.error(
-                            f"❌ الملف لازم يحتوي الأعمدة: {', '.join(req_cols)}"
-                        )
+                        st.error(f"❌ الملف لازم يحتوي الأعمدة: {', '.join(req_cols)}")
                     else:
                         count_ok = 0
                         for _, r in df_up.iterrows():
@@ -1049,43 +911,40 @@ with tab3:
                                     "subject_id": str(r["subject_id"]).strip(),
                                     "date": str(r["date"]).split()[0],
                                     "heures_absence": str(r["heures_absence"]),
-                                    "justifie": "Oui"
-                                    if str(r.get("justifie", "Non")).strip() == "Oui"
-                                    else "Non",
-                                    "commentaire": str(
-                                        r.get("commentaire", "")
-                                    ).strip(),
+                                    "justifie": "Oui" if str(r.get("justifie", "Non")).strip() == "Oui" else "Non",
+                                    "commentaire": str(r.get("commentaire", "")).strip(),
                                 }
                                 append_record(ABSENCES_SHEET, ABSENCES_COLS, rec)
                                 count_ok += 1
                             except Exception:
                                 continue
                         st.success(f"✅ تم استيراد {count_ok} غياب(ات) من الملف.")
+                        st.rerun()
                 except Exception as e:
                     st.error(f"❌ خطأ أثناء قراءة الملف: {e}")
 
-# ----------------- تبويب 4: تنبيهات 10٪ + واتساب -----------------
+# ----------------- تبويب 4: تجاوز 10٪ + واتساب -----------------
 with tab4:
-    st.subheader("🚨 تنبيهات اقتراب 10٪ غيابات + 💬 رسائل واتساب (فردي/جماعي)")
+    st.subheader("🚨 اللي فاتو 10٪ غيابات (غير مبرّرة) + 💬 زر واتساب")
 
     df_tr_all = load_trainees()
     df_tr_b = df_tr_all[df_tr_all["branche"] == branch].copy()
+
     df_sub_all = load_subjects()
     df_sub_b = df_sub_all[df_sub_all["branche"] == branch].copy()
+
     df_abs_all = load_absences()
 
     if df_tr_b.empty or df_sub_b.empty or df_abs_all.empty:
-        st.info("يلزم يكون فما متكوّنين + مواد + غيابات باش تظهر التنبيهات.")
+        st.info("يلزم يكون فما متكوّنين + مواد + غيابات باش تظهر القائمة.")
     else:
-        # --------- جزء التنبيهات (قريبين من 10٪) ----------
         df_abs = df_abs_all.merge(
-            df_tr_b[["id", "nom", "specialite"]],
+            df_tr_b[["id", "nom", "specialite", "telephone", "tel_parent"]],
             left_on="trainee_id",
             right_on="id",
             how="inner",
             suffixes=("", "_tr"),
-        )
-        df_abs = df_abs.merge(
+        ).merge(
             df_sub_b[["id", "nom_matiere", "heures_totales"]],
             left_on="subject_id",
             right_on="id",
@@ -1099,364 +958,104 @@ with tab4:
             df_abs["heures_absence_f"] = df_abs["heures_absence"].apply(as_float)
             df_abs["heures_totales_f"] = df_abs["heures_totales"].apply(as_float)
 
-            df_eff = df_abs[df_abs["justifie"] != "Oui"].copy()
+            df_eff = df_abs[(df_abs["justifie"] != "Oui") & (df_abs["heures_totales_f"] > 0)].copy()
 
             if df_eff.empty:
-                st.info("كل الغيابات مبررة، ما فماش تنبيهات 10٪.")
+                st.info("ما فماش غيابات غير مبرّرة (حسب الداتا الحالية).")
             else:
-                X = st.number_input(
-                    "أرني المتكوّنين اللي بقايلهم أقل من X ساعات قبل بلوغ 10٪ غيابات (غير مبررة)",
-                    min_value=0.0,
-                    value=2.0,
-                    step=0.5,
-                )
-
                 grp = df_eff.groupby(["trainee_id", "subject_id"], as_index=False).agg(
                     total_abs=("heures_absence_f", "sum"),
                     nom=("nom", "first"),
                     matiere=("nom_matiere", "first"),
-                    spec=("specialite", "first"),
+                    tel=("telephone", "first"),
+                    tel_parent=("tel_parent", "first"),
                     heures_tot=("heures_totales_f", "first"),
                 )
-
                 grp["limit_10"] = grp["heures_tot"] * 0.10
-                grp["remaining_before_10"] = grp["limit_10"] - grp["total_abs"]
-                grp = grp[grp["heures_tot"] > 0]
+                grp["excess"] = grp["total_abs"] - grp["limit_10"]
 
-                alerts = grp[
-                    (grp["remaining_before_10"] > 0)
-                    & (grp["remaining_before_10"] <= X)
-                ].copy()
+                exceeded = grp[grp["excess"] > 0].copy()
+                exceeded["total_abs"] = exceeded["total_abs"].round(2)
+                exceeded["excess"] = exceeded["excess"].round(2)
+                exceeded = exceeded.sort_values("excess", ascending=False).reset_index(drop=True)
 
-                if alerts.empty:
-                    st.success("💚 لا يوجد متكوّنين قريبين من 10٪ حسب الشرط الحالي.")
+                st.markdown("### ✅ قائمة اللي فاتو حدّ 10٪ (غيابات غير مبرّرة)")
+                if exceeded.empty:
+                    st.success("💚 ما فما حد فاتو 10٪ توّا.")
                 else:
-                    alerts["total_abs"] = alerts["total_abs"].round(2)
-                    alerts["limit_10"] = alerts["limit_10"].round(2)
-                    alerts["remaining_before_10"] = alerts[
-                        "remaining_before_10"
-                    ].round(2)
-                    alerts = alerts.sort_values("remaining_before_10")
-
-                    st.markdown("### قائمة المتكوّنين القريبين من بلوغ 10٪")
                     st.dataframe(
-                        alerts[
-                            [
-                                "nom",
-                                "spec",
-                                "matiere",
-                                "total_abs",
-                                "limit_10",
-                                "remaining_before_10",
-                            ]
-                        ].rename(
-                            columns={
-                                "nom": "المتكوّن",
-                                "spec": "التخصّص",
-                                "matiere": "المادة",
-                                "total_abs": "مجموع الغياب غير المبرر",
-                                "limit_10": "حد 10٪",
-                                "remaining_before_10": "الباقي قبل 10٪",
-                            }
-                        ),
+                        exceeded.rename(columns={
+                            "nom": "المتكوّن",
+                            "matiere": "المادة",
+                            "total_abs": "مجموع الغياب غير المبرر",
+                            "excess": "تجاوز بـ",
+                        })[["المتكوّن", "المادة", "مجموع الغياب غير المبرر", "تجاوز بـ"]],
                         use_container_width=True,
                     )
 
-        st.markdown("---")
-        st.markdown("### 💬 رسالة واتساب مفصّلة حسب الفترة (فردي)")
+                    st.markdown("---")
+                    colA, colB = st.columns([2, 1])
+                    with colA:
+                        target = st.radio("المرسل إليه", ["المتكوّن", "الولي"], horizontal=True, key="exceed_target")
+                    with colB:
+                        remedial_month = st.selectbox("شهر التدارك", ["جويلية", "أوت"], key="remedial_month")
 
-        # اختيار الاختصاص ثم المتربّص (باش يسهل الاختيار)
-        specs_branch = sorted(
-            [s for s in df_tr_b["specialite"].dropna().unique() if s]
-        )
-        spec_filter = st.selectbox(
-            "🔧 اختر التخصّص", ["(الكل)"] + specs_branch, key="wa_spec_single"
-        )
-        df_tr_wa = df_tr_b.copy()
-        if spec_filter != "(الكل)":
-            df_tr_wa = df_tr_wa[df_tr_wa["specialite"] == spec_filter]
+                    st.caption("زر واتساب قدّام كل متكوّن (الرسالة مختصرة كيما طلبت).")
 
-        if df_tr_wa.empty:
-            st.info("لا يوجد متكوّنون بهذا التخصّص.")
-        else:
-            labels_map_wa = {
-                f"{r['nom']} — {r['specialite']} ({r['telephone']})": r["id"]
-                for _, r in df_tr_wa.iterrows()
-            }
-            label_tr_wa = st.selectbox(
-                "👤 اختر المتكوّن للرسالة",
-                list(labels_map_wa.keys()),
-                key="wa_trainee_single",
-            )
-            trainee_id_wa = labels_map_wa[label_tr_wa]
-            tr_row = df_tr_all[df_tr_all["id"] == trainee_id_wa].iloc[0]
+                    for i, r in exceeded.iterrows():
+                        phone_target = r["tel"] if target == "المتكوّن" else r["tel_parent"]
+                        phone_target = normalize_phone(phone_target)
+                        if not phone_target:
+                            continue
 
-            target_wa = st.radio(
-                "المرسل إليه", ["المتكوّن", "الولي"], horizontal=True, key="wa_target_single"
-            )
-            phone_target = (
-                tr_row["telephone"] if target_wa == "المتكوّن" else tr_row["tel_parent"]
-            )
-            phone_target = normalize_phone(phone_target)
-
-            st.markdown("#### 🕒 اختر الفترة")
-            period_type = st.radio(
-                "نوع الفترة",
-                ["يوم", "أسبوع", "شهر", "مخصص"],
-                horizontal=True,
-                key="wa_period_single",
-            )
-            today = date.today()
-
-            if period_type == "يوم":
-                d_single = st.date_input("اليوم", value=today, key="wa_day_single")
-                d_from = d_single
-                d_to = d_single
-                period_label = f"بتاريخ {d_single.strftime('%Y-%m-%d')}"
-            elif period_type == "أسبوع":
-                week_start = st.date_input(
-                    "بداية الأسبوع", value=today, key="wa_week_start_single"
-                )
-                d_from = week_start
-                d_to = week_start + timedelta(days=6)
-                period_label = (
-                    f"من {d_from.strftime('%Y-%m-%d')} إلى {d_to.strftime('%Y-%m-%d')}"
-                )
-            elif period_type == "شهر":
-                any_day = st.date_input(
-                    "أي يوم من الشهر المطلوب",
-                    value=today,
-                    key="wa_month_day_single",
-                )
-                first = any_day.replace(day=1)
-                if first.month == 12:
-                    next_first = first.replace(year=first.year + 1, month=1)
-                else:
-                    next_first = first.replace(month=first.month + 1)
-                last = next_first - timedelta(days=1)
-                d_from = first
-                d_to = last
-                period_label = (
-                    f"من {d_from.strftime('%Y-%m-%d')} إلى {d_to.strftime('%Y-%m-%d')} (شهر كامل)"
-                )
-            else:
-                colp1, colp2 = st.columns(2)
-                with colp1:
-                    d_from = st.date_input(
-                        "من تاريخ",
-                        value=today - timedelta(days=7),
-                        key="wa_from_single",
-                    )
-                with colp2:
-                    d_to = st.date_input(
-                        "إلى تاريخ", value=today, key="wa_to_single"
-                    )
-                if d_to < d_from:
-                    st.error("❌ تاريخ النهاية لازم يكون بعد البداية.")
-                    d_from, d_to = d_to, d_from
-                period_label = (
-                    f"من {d_from.strftime('%Y-%m-%d')} إلى {d_to.strftime('%Y-%m-%d')}"
-                )
-
-            if st.button("📲 جهّز رسالة الواتساب (فردي)"):
-                if not phone_target:
-                    st.error("❌ ما فماش رقم هاتف مضبوط للمتكوّن/الولي.")
-                else:
-                    msg, info_debug = build_whatsapp_message_for_trainee(
-                        tr_row,
-                        df_abs_all,
-                        df_sub_all,
-                        branch,
-                        d_from,
-                        d_to,
-                        period_label,
-                    )
-                    if not msg:
-                        st.info("لا توجد غيابات في هذه الفترة لهذا المتكوّن.")
-                    else:
-                        st.caption("معلومة تقنية: " + " | ".join(info_debug))
-                        st.text_area(
-                            "نص الرسالة (يمكنك تعديله قبل الإرسال)",
-                            value=msg,
-                            height=250,
+                        # ✅ الرسالة المختصرة
+                        msg = (
+                            f"👤 المتكوّن: {r['nom']}\n"
+                            f"📚 المادة: {r['matiere']}\n"
+                            f"⛔ مجموع الغياب غير المبرر: {float(r['total_abs']):.2f} ساعة\n"
+                            f"⚠️ تجاوز بـ: {float(r['excess']):.2f} ساعة\n\n"
+                            f"📌 دورة التدارك: {remedial_month}"
                         )
+
                         link = wa_link(phone_target, msg)
-                        st.markdown(f"[📲 افتح رسالة الواتساب الجاهزة]({link})")
 
-                        # تسجيل في سجل الإشعارات
-                        append_notification_log(
-                            trainee_id=tr_row["id"],
-                            phone=phone_target,
-                            target="Trainee" if target_wa == "المتكوّن" else "Parent",
-                            branche=branch,
-                            period_from=d_from,
-                            period_to=d_to,
-                            period_label=period_label,
-                        )
-
-        # -------- WhatsApp جماعي --------
-        st.markdown("---")
-        st.markdown("### 💬 رسائل واتساب جماعية (عدة متكوّنين في نفس الفترة)")
-
-        spec_batch = st.selectbox(
-            "🔧 اختر التخصّص (لإرسال جماعي)",
-            ["(الكل)"] + specs_branch,
-            key="wa_spec_batch",
-        )
-        df_tr_batch = df_tr_b.copy()
-        if spec_batch != "(الكل)":
-            df_tr_batch = df_tr_batch[df_tr_batch["specialite"] == spec_batch]
-
-        if df_tr_batch.empty:
-            st.info("لا يوجد متكوّنون لهذا الشرط.")
-        else:
-            st.markdown("#### 🕒 اختر الفترة المشتركة")
-            period_type_b = st.radio(
-                "نوع الفترة",
-                ["يوم", "أسبوع", "شهر", "مخصص"],
-                horizontal=True,
-                key="wa_period_batch",
-            )
-            today_b = date.today()
-
-            if period_type_b == "يوم":
-                d_single_b = st.date_input(
-                    "اليوم", value=today_b, key="wa_day_batch"
-                )
-                d_from_b = d_single_b
-                d_to_b = d_single_b
-                period_label_b = f"بتاريخ {d_single_b.strftime('%Y-%m-%d')}"
-            elif period_type_b == "أسبوع":
-                week_start_b = st.date_input(
-                    "بداية الأسبوع", value=today_b, key="wa_week_start_batch"
-                )
-                d_from_b = week_start_b
-                d_to_b = week_start_b + timedelta(days=6)
-                period_label_b = (
-                    f"من {d_from_b.strftime('%Y-%m-%d')} إلى {d_to_b.strftime('%Y-%m-%d')}"
-                )
-            elif period_type_b == "شهر":
-                any_day_b = st.date_input(
-                    "أي يوم من الشهر المطلوب",
-                    value=today_b,
-                    key="wa_month_day_batch",
-                )
-                first_b = any_day_b.replace(day=1)
-                if first_b.month == 12:
-                    next_first_b = first_b.replace(year=first_b.year + 1, month=1)
-                else:
-                    next_first_b = first_b.replace(month=first_b.month + 1)
-                last_b = next_first_b - timedelta(days=1)
-                d_from_b = first_b
-                d_to_b = last_b
-                period_label_b = (
-                    f"من {d_from_b.strftime('%Y-%m-%d')} إلى {d_to_b.strftime('%Y-%m-%d')} (شهر كامل)"
-                )
-            else:
-                colpb1, colpb2 = st.columns(2)
-                with colpb1:
-                    d_from_b = st.date_input(
-                        "من تاريخ",
-                        value=today_b - timedelta(days=7),
-                        key="wa_from_batch",
-                    )
-                with colpb2:
-                    d_to_b = st.date_input(
-                        "إلى تاريخ", value=today_b, key="wa_to_batch"
-                    )
-                if d_to_b < d_from_b:
-                    st.error("❌ تاريخ النهاية لازم يكون بعد البداية.")
-                    d_from_b, d_to_b = d_to_b, d_from_b
-                period_label_b = (
-                    f"من {d_from_b.strftime('%Y-%m-%d')} إلى {d_to_b.strftime('%Y-%m-%d')}"
-                )
-
-            target_batch = st.radio(
-                "المرسل إليه في الجماعي",
-                ["المتكوّن", "الولي"],
-                horizontal=True,
-                key="wa_target_batch",
-            )
-
-            if st.button("📲 توليد روابط الواتساب لكل المتكوّنين (جماعي)"):
-                rows_out = []
-                for _, tr in df_tr_batch.iterrows():
-                    phone_t = (
-                        tr["telephone"]
-                        if target_batch == "المتكوّن"
-                        else tr["tel_parent"]
-                    )
-                    phone_t = normalize_phone(phone_t)
-                    if not phone_t:
-                        continue
-                    msg_t, _ = build_whatsapp_message_for_trainee(
-                        tr,
-                        df_abs_all,
-                        df_sub_all,
-                        branch,
-                        d_from_b,
-                        d_to_b,
-                        period_label_b,
-                    )
-                    if not msg_t:
-                        continue
-                    link_t = wa_link(phone_t, msg_t)
-                    rows_out.append(
-                        {
-                            "trainee_id": tr["id"],
-                            "المتكوّن": tr["nom"],
-                            "التخصّص": tr.get("specialite", ""),
-                            "الهاتف": phone_t,
-                            "رابط_الواتساب": link_t,
-                        }
-                    )
-
-                    # تسجيل في سجل الإشعارات لكل متكوّن في الإرسال الجماعي
-                    append_notification_log(
-                        trainee_id=tr["id"],
-                        phone=phone_t,
-                        target="Trainee" if target_batch == "المتكوّن" else "Parent",
-                        branche=branch,
-                        period_from=d_from_b,
-                        period_to=d_to_b,
-                        period_label=period_label_b,
-                    )
-
-                if not rows_out:
-                    st.info(
-                        "لا يوجد متكوّنين لديهم غيابات في هذه الفترة حسب الشروط."
-                    )
-                else:
-                    st.markdown("#### قائمة روابط الواتساب الجاهزة")
-                    st.caption(
-                        "إضغط على الزر قدّام كل متكوّن لفتح المحادثة في نافذة جديدة."
-                    )
-
-                    for i, row in enumerate(rows_out, start=1):
                         st.markdown(
                             f"""
-                            <div style="margin-bottom:10px; padding:8px; border:1px solid #eee; border-radius:6px;">
-                              <b>{i}. {row['المتكوّن']}</b><br/>
-                              التخصّص: {row.get('التخصّص','')}<br/>
-                              الهاتف: {row['الهاتف']}<br/>
-                              <a href="{row['رابط_الواتساب']}" target="_blank"
+                            <div style="margin-bottom:10px; padding:10px; border:1px solid #eee; border-radius:8px;">
+                              <b>{i+1}. {r['nom']}</b><br/>
+                              المادة: {r['matiere']} | تجاوز بـ: {float(r['excess']):.2f}h<br/>
+                              <a href="{link}" target="_blank"
                                  style="
                                     display:inline-block;
-                                    margin-top:6px;
-                                    padding:6px 14px;
+                                    margin-top:8px;
+                                    padding:7px 14px;
                                     background-color:#25D366;
                                     color:white;
                                     text-decoration:none;
-                                    border-radius:6px;
-                                    font-weight:600;
+                                    border-radius:7px;
+                                    font-weight:700;
                                     font-size:14px;
                                  ">
-                                 📲 فتح واتساب
+                                 📲 واتساب
                               </a>
                             </div>
                             """,
                             unsafe_allow_html=True,
                         )
+
+                        # تسجيل في Notifications_Log
+                        try:
+                            append_notification_log(
+                                trainee_id=str(r["trainee_id"]),
+                                phone=phone_target,
+                                target="Trainee" if target == "المتكوّن" else "Parent",
+                                branche=branch,
+                                period_from=date.today(),
+                                period_to=date.today(),
+                                period_label=f"تجاوز 10٪ + تدارك {remedial_month}",
+                            )
+                        except Exception:
+                            pass
 
 # ----------------- تبويب 5: سجل الإشعارات -----------------
 with tab5:
@@ -1468,20 +1067,13 @@ with tab5:
     if df_notif.empty:
         st.info("ما زال ما تمّ تسجيل حتى إشعار مرسل.")
     else:
-        # نركّز على الفرع الحالي
         df_notif_b = df_notif[df_notif["branche"] == branch].copy()
         if df_notif_b.empty:
             st.info("ما فماش إشعارات مسجلة لهذا الفرع.")
         else:
-            # نربط مع المتكوّنين باش ناخذ الاسم و التخصّص
-            df_tr_all_small = df_tr_all[["id", "nom", "specialite"]].rename(
-                columns={"id": "trainee_id"}
-            )
-            df_notif_b = df_notif_b.merge(
-                df_tr_all_small, on="trainee_id", how="left"
-            )
+            df_tr_all_small = df_tr_all[["id", "nom", "specialite"]].rename(columns={"id": "trainee_id"})
+            df_notif_b = df_notif_b.merge(df_tr_all_small, on="trainee_id", how="left")
 
-            # تنسيق التاريخ
             def fmt_ts(x: str) -> str:
                 try:
                     dt = datetime.fromisoformat(x)
@@ -1490,19 +1082,8 @@ with tab5:
                     return x
 
             df_notif_b["تاريخ الإرسال"] = df_notif_b["sent_at_iso"].apply(fmt_ts)
+            df_notif_b = df_notif_b.sort_values("sent_at_iso", ascending=False).reset_index(drop=True)
 
-            df_notif_b = df_notif_b.sort_values(
-                "sent_at_iso", ascending=False
-            ).reset_index(drop=True)
-
-            show_cols = [
-                "تاريخ الإرسال",
-                "nom",
-                "specialite",
-                "phone",
-                "target",
-                "period_label",
-            ]
             df_notif_b = df_notif_b.rename(
                 columns={
                     "nom": "المتكوّن",
@@ -1514,16 +1095,6 @@ with tab5:
             )
 
             st.dataframe(
-                df_notif_b[
-                    [
-                        "تاريخ الإرسال",
-                        "المتكوّن",
-                        "التخصّص",
-                        "الهاتف",
-                        "المرسل إليه",
-                        "الفترة",
-                    ]
-                ],
+                df_notif_b[["تاريخ الإرسال", "المتكوّن", "التخصّص", "الهاتف", "المرسل إليه", "الفترة"]],
                 use_container_width=True,
             )
-
